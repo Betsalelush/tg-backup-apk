@@ -6,83 +6,92 @@
 <title>TG Backup</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
-  :root{
-    --bg:#0f1117;--surface:#1a1d2e;--border:#2a2d3e;--input:#12151f;
-    --blue:#2979ff;--green:#00c853;--red:#c62828;--orange:#e65100;--teal:#006064;
-    --text:#e0e0e0;--muted:#888;--accent:#82b1ff;
-  }
-  html,body{height:100%;background:var(--bg);color:var(--text);
-    font-family:'Segoe UI',Arial,sans-serif;font-size:14px;}
+  html,body{height:100%;background:#f5f5f5;color:#111;
+    font-family:Arial,sans-serif;font-size:15px;}
 
-  /* ── header ── */
-  header{background:var(--surface);padding:0 16px;height:52px;display:flex;
-    align-items:center;gap:10px;border-bottom:2px solid var(--blue);
+  /* header */
+  header{background:#fff;padding:0 14px;height:50px;display:flex;
+    align-items:center;gap:10px;border-bottom:2px solid #1565c0;
     position:sticky;top:0;z-index:10;}
-  header h1{font-size:1.1rem;color:var(--accent);flex:1}
-  #dot{width:11px;height:11px;border-radius:50%;background:var(--muted);
-    transition:background .3s,box-shadow .3s;flex-shrink:0}
-  #dot.on{background:#00e676;box-shadow:0 0 8px #00e67688}
-  #dot.pause{background:#ffd740;box-shadow:0 0 8px #ffd74088}
+  header h1{font-size:1.1rem;color:#1565c0;flex:1;font-weight:700}
+  #dot{width:12px;height:12px;border-radius:50%;background:#bbb;flex-shrink:0}
+  #dot.on{background:#2e7d32}
+  #dot.pause{background:#e65100}
+  #statusText{font-size:.85rem;color:#555}
 
-  /* ── controls bar ── */
-  #ctrl{background:#13161f;border-bottom:1px solid var(--border);
-    padding:8px 12px;display:flex;gap:8px;flex-wrap:wrap}
-  button{padding:8px 16px;border-radius:6px;border:none;cursor:pointer;
-    font-weight:600;font-size:13px;transition:filter .15s}
-  button:active{filter:brightness(.8)}
+  /* controls */
+  #ctrl{background:#fff;border-bottom:1px solid #ddd;padding:8px 10px;
+    display:flex;gap:6px;flex-wrap:wrap}
+  button{padding:8px 14px;border-radius:5px;border:1px solid #bbb;cursor:pointer;
+    font-weight:700;font-size:13px;background:#fff;color:#111}
+  button:active{background:#eee}
   button:disabled{opacity:.35;cursor:not-allowed}
-  #bStart {background:var(--green);color:#000}
-  #bPause {background:var(--orange);color:#fff}
-  #bResume{background:var(--teal);color:#fff}
-  #bStop  {background:var(--red);color:#fff}
-  #bSave  {background:var(--blue);color:#fff;margin-right:auto}
+  #bStart {background:#2e7d32;color:#fff;border-color:#2e7d32}
+  #bPause {background:#e65100;color:#fff;border-color:#e65100}
+  #bResume{background:#1565c0;color:#fff;border-color:#1565c0}
+  #bStop  {background:#c62828;color:#fff;border-color:#c62828}
+  #bSave  {background:#fff;color:#1565c0;border-color:#1565c0;margin-right:auto}
 
-  /* ── tabs ── */
-  .tabs{display:flex;border-bottom:1px solid var(--border);background:var(--surface)}
-  .tab{padding:10px 18px;cursor:pointer;color:var(--muted);font-weight:600;
-    border-bottom:2px solid transparent;transition:color .2s}
-  .tab.active{color:var(--accent);border-color:var(--blue)}
+  /* tabs */
+  .tabs{display:flex;border-bottom:2px solid #ddd;background:#fff}
+  .tab{padding:10px 16px;cursor:pointer;color:#555;font-weight:700;
+    border-bottom:3px solid transparent;margin-bottom:-2px;font-size:14px}
+  .tab.active{color:#1565c0;border-color:#1565c0}
 
-  .panel{display:none;padding:14px}
+  .panel{display:none;padding:12px}
   .panel.active{display:block}
 
-  /* ── form elements ── */
-  .field{margin-bottom:12px}
-  label{display:block;font-size:.75rem;color:var(--accent);margin-bottom:4px}
-  input{width:100%;padding:8px 10px;border-radius:6px;border:1px solid var(--border);
-    background:var(--input);color:var(--text);font-size:13px}
-  input:focus{outline:none;border-color:var(--blue)}
-  input[type=password]{letter-spacing:2px}
+  /* form */
+  .field{margin-bottom:10px}
+  label{display:block;font-size:.8rem;color:#1565c0;margin-bottom:3px;font-weight:700}
+  input{width:100%;padding:9px 10px;border-radius:5px;border:1px solid #bbb;
+    background:#fff;color:#111;font-size:14px}
+  input:focus{outline:none;border-color:#1565c0}
 
-  /* ── accounts ── */
-  .acc-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
-  .atab{padding:5px 14px;border-radius:20px;border:1px solid var(--border);
-    background:var(--input);cursor:pointer;font-size:.82rem;color:var(--muted)}
-  .atab.active{border-color:var(--blue);color:var(--accent);background:#2979ff14}
+  /* accounts */
+  .acc-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .atab{padding:5px 14px;border-radius:20px;border:1px solid #bbb;
+    background:#fff;cursor:pointer;font-size:.85rem;color:#555;font-weight:700}
+  .atab.active{border-color:#1565c0;color:#1565c0;background:#e3f2fd}
   .apanel{display:none}.apanel.active{display:block}
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  @media(max-width:500px){.grid2{grid-template-columns:1fr}}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  @media(max-width:480px){.grid2{grid-template-columns:1fr}}
 
-  .acc-btns{display:flex;gap:8px;margin-bottom:10px}
+  .acc-btns{display:flex;gap:6px;margin-bottom:10px}
   .sm{padding:6px 12px;font-size:.8rem}
-  .btn-add{background:#1b5e20;color:#fff}
-  .btn-del{background:var(--red);color:#fff}
+  .btn-add{background:#1b5e20;color:#fff;border-color:#1b5e20}
+  .btn-del{background:#c62828;color:#fff;border-color:#c62828}
 
-  /* ── progress ── */
-  .info-box{background:var(--surface);border-radius:8px;padding:12px;margin-bottom:12px;
-    border:1px solid var(--border)}
-  .info-box strong{color:var(--accent)}
-  .big-num{font-size:1.4rem;font-weight:700;color:#00e676;font-family:monospace}
+  /* connect section */
+  .connect-box{background:#fff;border:1px solid #bbb;border-radius:6px;
+    padding:10px;margin-top:10px}
+  .connect-box h3{font-size:.9rem;color:#1565c0;margin-bottom:8px;font-weight:700}
+  .conn-status{font-size:.8rem;font-weight:700;padding:3px 8px;border-radius:10px;
+    display:inline-block;margin-bottom:6px}
+  .conn-status.connected{background:#e8f5e9;color:#2e7d32}
+  .conn-status.pending_code{background:#fff3e0;color:#e65100}
+  .conn-status.pending_pw{background:#fff3e0;color:#e65100}
+  .conn-status.error{background:#ffebee;color:#c62828}
+  .conn-status.unknown{background:#f5f5f5;color:#555}
+  .conn-row{display:flex;gap:6px;align-items:flex-end}
+  .conn-row input{flex:1}
+  .btn-connect{background:#1565c0;color:#fff;border-color:#1565c0;white-space:nowrap}
 
-  /* ── log ── */
-  #log{background:#0a0c12;border-radius:8px;padding:10px;height:320px;
-    overflow-y:auto;font-family:monospace;font-size:.78rem}
-  .ll{padding:1px 0;line-height:1.5}
-  .ll .ts{color:#444;margin-left:6px}
-  .ll.success{color:#00e676}.ll.error{color:#ff5252}
-  .ll.warn{color:#ffd740}.ll.info{color:#82b1ff}
+  /* info box */
+  .info-box{background:#fff;border-radius:6px;padding:12px;margin-bottom:10px;
+    border:1px solid #ddd}
+  .info-box strong{color:#1565c0}
+  .big-num{font-size:1.4rem;font-weight:700;color:#2e7d32;font-family:monospace}
+
+  /* log */
+  #log{background:#fff;border:1px solid #ddd;border-radius:6px;padding:8px;
+    height:300px;overflow-y:auto;font-family:monospace;font-size:.8rem}
+  .ll{padding:1px 0;line-height:1.6}
+  .ll .ts{color:#999;margin-left:6px}
+  .ll.success{color:#2e7d32}.ll.error{color:#c62828}
+  .ll.warn{color:#e65100}.ll.info{color:#1565c0}
   #logBar{display:flex;gap:8px;margin-bottom:6px;align-items:center}
-  #logCount{font-size:.75rem;color:var(--muted);flex:1}
+  #logCount{font-size:.8rem;color:#555;flex:1}
 </style>
 </head>
 <body>
@@ -90,7 +99,7 @@
 <header>
   <div id="dot"></div>
   <h1>TG Backup</h1>
-  <span id="statusText" style="font-size:.8rem;color:var(--muted)">Stopped</span>
+  <span id="statusText">Stopped</span>
 </header>
 
 <div id="ctrl">
@@ -101,18 +110,17 @@
   <button id="bStop"   onclick="stopBot()">■ Stop</button>
 </div>
 
-<!-- ── Tabs ── -->
 <div class="tabs">
-  <div class="tab active" onclick="switchTab(0)">Accounts</div>
-  <div class="tab" onclick="switchTab(1)">Channels</div>
-  <div class="tab" onclick="switchTab(2)">Logs</div>
+  <div class="tab active" onclick="switchTab(0)">חשבונות</div>
+  <div class="tab" onclick="switchTab(1)">ערוצים</div>
+  <div class="tab" onclick="switchTab(2)">לוג</div>
 </div>
 
 <!-- Accounts -->
 <div class="panel active" id="p0">
   <div class="acc-btns">
-    <button class="sm btn-add" onclick="addAccount()">＋ Add</button>
-    <button class="sm btn-del" onclick="delAccount()">✕ Remove</button>
+    <button class="sm btn-add" onclick="addAccount()">＋ הוסף</button>
+    <button class="sm btn-del" onclick="delAccount()">✕ הסר</button>
   </div>
   <div class="acc-tabs" id="accTabs"></div>
   <div id="accPanels"></div>
@@ -121,39 +129,36 @@
 <!-- Channels -->
 <div class="panel" id="p1">
   <div class="field">
-    <label>Source Chat ID (channel to copy FROM)</label>
+    <label>מקור — Chat ID (להעתיק ממנו)</label>
     <input id="src" type="text" placeholder="-1001234567890">
   </div>
   <div class="field">
-    <label>Target Chat ID (channel to copy TO)</label>
+    <label>יעד — Chat ID (להעתיק אליו)</label>
     <input id="tgt" type="text" placeholder="-1009876543210">
   </div>
   <div class="info-box">
-    <strong>Last Processed Message:</strong><br>
+    <strong>הודעה אחרונה שעובדה:</strong><br>
     <span class="big-num" id="lastIdVal">0</span>
     <button class="sm btn-del" style="margin-right:8px;margin-top:6px"
-      onclick="resetLastId()">Reset to 0</button>
+      onclick="resetLastId()">Reset</button>
   </div>
 </div>
 
 <!-- Logs -->
 <div class="panel" id="p2">
   <div id="logBar">
-    <span id="logCount">0 lines</span>
-    <button class="sm" onclick="clearLogs()">Clear</button>
+    <span id="logCount">0 שורות</span>
+    <button class="sm" onclick="clearLogs()">נקה</button>
   </div>
   <div id="log"></div>
 </div>
 
 <script>
-// ── state ─────────────────────────────────────────────────────────────────────
 const cfg = {{ config|tojson }};
 let accounts = cfg.accounts || [];
-let logCount = 0;
-let activeAccIdx = 0;
-let activeTabIdx = 0;
+let logCount = 0, activeAccIdx = 0;
+let authStatus = {};
 
-// ── init ──────────────────────────────────────────────────────────────────────
 function init() {
   document.getElementById('src').value = cfg.source_chat_id || '';
   document.getElementById('tgt').value = cfg.target_chat_id || '';
@@ -163,47 +168,75 @@ function init() {
   connectSSE();
 }
 
-// ── tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(i) {
   document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('active',j===i));
   document.querySelectorAll('.panel').forEach((p,j)=>p.classList.toggle('active',j===i));
-  activeTabIdx = i;
 }
 
-// ── accounts UI ───────────────────────────────────────────────────────────────
 function buildAccUI() {
   const tabs = document.getElementById('accTabs');
   const panels = document.getElementById('accPanels');
   tabs.innerHTML = ''; panels.innerHTML = '';
 
   if (!accounts.length) {
-    panels.innerHTML = '<p style="color:var(--muted);padding:10px">No accounts yet. Click + Add.</p>';
+    panels.innerHTML = '<p style="color:#555;padding:10px">אין חשבונות. לחץ ＋ הוסף.</p>';
     return;
   }
 
   accounts.forEach((a, i) => {
     const t = document.createElement('div');
-    t.className = 'atab' + (i === activeAccIdx ? ' active' : '');
+    t.className = 'atab' + (i===activeAccIdx?' active':'');
     t.textContent = a.client_name || `Acc ${i+1}`;
-    t.onclick = () => switchAcc(i);
+    t.onclick = ()=>switchAcc(i);
     tabs.appendChild(t);
 
+    const name = a.client_name || `acc${i}`;
+    const st   = authStatus[name] || 'unknown';
+    const stLabel = {connected:'מחובר',pending_code:'ממתין לקוד',pending_pw:'ממתין לסיסמה',error:'שגיאה',unknown:'לא מחובר'};
+
     const p = document.createElement('div');
-    p.className = 'apanel' + (i === activeAccIdx ? ' active' : '');
+    p.className = 'apanel' + (i===activeAccIdx?' active':'');
     p.id = `ap${i}`;
     p.innerHTML = `
       <div class="grid2">
-        <div class="field"><label>Client Name</label>
+        <div class="field"><label>שם חשבון</label>
           <input id="cn${i}" value="${a.client_name||''}" oninput="syncAccTab(${i})"></div>
-        <div class="field"><label>Phone (972...)</label>
+        <div class="field"><label>טלפון (972...)</label>
           <input id="ph${i}" value="${a.phone_number||''}"></div>
         <div class="field"><label>API ID</label>
           <input id="ai${i}" value="${a.api_id||''}"></div>
         <div class="field"><label>API Hash</label>
           <input id="ah${i}" type="password" value="${a.api_hash||''}"></div>
+      </div>
+      <div class="connect-box" id="cbox${i}">
+        <h3>התחברות לטלגרם</h3>
+        <span class="conn-status ${st}" id="cst${i}">${stLabel[st]||st}</span>
+        <div id="cform${i}">${buildConnForm(i, st)}</div>
       </div>`;
     panels.appendChild(p);
   });
+}
+
+function buildConnForm(i, st) {
+  if (st === 'connected') return '<p style="color:#2e7d32;font-size:.85rem;margin-top:4px">✔ החשבון מחובר ומוכן</p>';
+  if (st === 'pending_code') return `
+    <div class="conn-row" style="margin-top:6px">
+      <input id="code${i}" type="number" placeholder="קוד אימות מהטלגרם">
+      <button class="sm btn-connect" onclick="verifyCode(${i})">אמת קוד</button>
+    </div>`;
+  if (st === 'pending_pw') return `
+    <div class="conn-row" style="margin-top:6px">
+      <input id="pw${i}" type="password" placeholder="סיסמה דו-שלבית">
+      <button class="sm btn-connect" onclick="sendPassword(${i})">אישור</button>
+    </div>`;
+  return `<div style="margin-top:6px">
+    <button class="sm btn-connect" onclick="sendCode(${i})">📱 שלח קוד לטלפון</button>
+  </div>`;
+}
+
+function syncAccTab(i) {
+  const tabs = document.querySelectorAll('.atab');
+  if (tabs[i]) tabs[i].textContent = document.getElementById(`cn${i}`)?.value || `Acc ${i+1}`;
 }
 
 function switchAcc(i) {
@@ -212,104 +245,142 @@ function switchAcc(i) {
   document.querySelectorAll('.apanel').forEach((p,j)=>p.classList.toggle('active',j===i));
 }
 
-function syncAccTab(i) {
-  const tabs = document.querySelectorAll('.atab');
-  if (tabs[i]) tabs[i].textContent = document.getElementById(`cn${i}`)?.value || `Acc ${i+1}`;
-}
-
 function addAccount() {
   accounts.push({client_name:`account${accounts.length+1}`,phone_number:'',api_id:'',api_hash:''});
-  activeAccIdx = accounts.length - 1;
+  activeAccIdx = accounts.length-1;
   buildAccUI();
 }
 
 function delAccount() {
   if (!accounts.length) return;
-  accounts.splice(activeAccIdx, 1);
-  activeAccIdx = Math.max(0, activeAccIdx - 1);
+  accounts.splice(activeAccIdx,1);
+  activeAccIdx = Math.max(0,activeAccIdx-1);
   buildAccUI();
 }
 
-// ── gather config ─────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
+async function sendCode(i) {
+  await saveConfig();
+  setStatus(i,'pending_code','שולח קוד…');
+  const r = await (await fetch('/auth/send_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({acc_idx:i})})).json();
+  if (r.ok && r.already) { updateConnStatus(i,'connected'); return; }
+  if (r.ok) { updateConnStatus(i,'pending_code'); return; }
+  updateConnStatus(i,'error'); addLog({time:now(),level:'error',msg:r.msg});
+}
+
+async function verifyCode(i) {
+  const code = document.getElementById(`code${i}`)?.value.trim();
+  if (!code) return;
+  const r = await (await fetch('/auth/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({acc_idx:i,code})})).json();
+  if (r.ok) { updateConnStatus(i,'connected'); return; }
+  if (r.need_password) { updateConnStatus(i,'pending_pw'); return; }
+  updateConnStatus(i,'error'); addLog({time:now(),level:'error',msg:r.msg});
+}
+
+async function sendPassword(i) {
+  const pw = document.getElementById(`pw${i}`)?.value;
+  if (!pw) return;
+  const r = await (await fetch('/auth/password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({acc_idx:i,password:pw})})).json();
+  if (r.ok) { updateConnStatus(i,'connected'); return; }
+  updateConnStatus(i,'error'); addLog({time:now(),level:'error',msg:r.msg});
+}
+
+function setStatus(i, st, text) {
+  const el = document.getElementById(`cst${i}`);
+  if (!el) return;
+  el.className = `conn-status ${st}`;
+  el.textContent = text;
+}
+
+function updateConnStatus(i, st) {
+  const name = accounts[i]?.client_name || `acc${i}`;
+  authStatus[name] = st;
+  const stLabel = {connected:'מחובר',pending_code:'ממתין לקוד',pending_pw:'ממתין לסיסמה',error:'שגיאה',unknown:'לא מחובר'};
+  setStatus(i, st, stLabel[st]||st);
+  const form = document.getElementById(`cform${i}`);
+  if (form) form.innerHTML = buildConnForm(i, st);
+}
+
+// ── Config ────────────────────────────────────────────────────────────────────
 function gatherConfig() {
-  const accs = accounts.map((_, i) => ({
-    client_name: document.getElementById(`cn${i}`)?.value.trim() || `account${i+1}`,
-    phone_number: document.getElementById(`ph${i}`)?.value.trim() || '',
-    api_id:       document.getElementById(`ai${i}`)?.value.trim() || '',
-    api_hash:     document.getElementById(`ah${i}`)?.value.trim() || '',
-  }));
   return {
-    accounts: accs,
+    accounts: accounts.map((_,i)=>({
+      client_name: document.getElementById(`cn${i}`)?.value.trim()||`account${i+1}`,
+      phone_number:document.getElementById(`ph${i}`)?.value.trim()||'',
+      api_id:      document.getElementById(`ai${i}`)?.value.trim()||'',
+      api_hash:    document.getElementById(`ah${i}`)?.value.trim()||'',
+    })),
     source_chat_id: document.getElementById('src').value.trim(),
     target_chat_id: document.getElementById('tgt').value.trim(),
   };
 }
 
 async function saveConfig() {
-  const c = gatherConfig();
-  accounts = c.accounts;
-  await fetch('/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(c)});
-  addLog({time:now(), level:'success', msg:'Config saved.'});
+  const c = gatherConfig(); accounts = c.accounts;
+  await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(c)});
+  addLog({time:now(),level:'success',msg:'נשמר.'});
 }
 
-// ── controls ──────────────────────────────────────────────────────────────────
 async function startBot()  { await saveConfig(); const r=await(await fetch('/start',{method:'POST'})).json(); if(!r.ok) addLog({time:now(),level:'error',msg:r.msg}); }
-async function stopBot()   { await fetch('/stop',  {method:'POST'}); }
-async function pauseBot()  { await fetch('/pause',  {method:'POST'}); }
-async function resumeBot() { await fetch('/resume', {method:'POST'}); }
+async function stopBot()   { await fetch('/stop',{method:'POST'}); }
+async function pauseBot()  { await fetch('/pause',{method:'POST'}); }
+async function resumeBot() { await fetch('/resume',{method:'POST'}); }
 
 async function resetLastId() {
-  await fetch('/config', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({...gatherConfig(), _reset_last_id: true})});
-  // just zero the display; server doesn't need to handle it specially
-  document.getElementById('lastIdVal').textContent = '0';
+  await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...gatherConfig(),_reset_last_id:true})});
+  document.getElementById('lastIdVal').textContent='0';
 }
 
-// ── status polling ────────────────────────────────────────────────────────────
+// ── Status ────────────────────────────────────────────────────────────────────
 async function pollStatus() {
   try {
-    const s = await (await fetch('/status')).json();
-    const lid = await (await fetch('/last_id')).json();
+    const [s, lid, ast] = await Promise.all([
+      fetch('/status').then(r=>r.json()),
+      fetch('/last_id').then(r=>r.json()),
+      fetch('/auth/status').then(r=>r.json()),
+    ]);
     applyStatus(s.running, s.paused);
     if (lid.last_id) document.getElementById('lastIdVal').textContent = lid.last_id;
+    let changed = false;
+    for (const [name, st] of Object.entries(ast)) {
+      if (authStatus[name] !== st) { authStatus[name]=st; changed=true; }
+    }
+    if (changed) buildAccUI();
   } catch {}
 }
 
 function applyStatus(running, paused) {
-  const dot  = document.getElementById('dot');
-  const txt  = document.getElementById('statusText');
-  dot.className = running ? (paused ? 'pause' : 'on') : '';
-  txt.textContent = running ? (paused ? 'Paused' : 'Running') : 'Stopped';
-
+  const dot = document.getElementById('dot');
+  const txt = document.getElementById('statusText');
+  dot.className = running?(paused?'pause':'on'):'';
+  txt.textContent = running?(paused?'מושהה':'פועל'):'עצור';
   document.getElementById('bStart').disabled  = running;
   document.getElementById('bStop').disabled   = !running;
-  document.getElementById('bPause').disabled  = !running || paused;
-  document.getElementById('bResume').disabled = !running || !paused;
+  document.getElementById('bPause').disabled  = !running||paused;
+  document.getElementById('bResume').disabled = !running||!paused;
 }
 
-// ── SSE logs ──────────────────────────────────────────────────────────────────
+// ── SSE ───────────────────────────────────────────────────────────────────────
 function connectSSE() {
   const es = new EventSource('/logs');
   es.onmessage = e => { try { addLog(JSON.parse(e.data)); } catch{} };
-  es.onerror = () => setTimeout(connectSSE, 3000);
+  es.onerror   = () => setTimeout(connectSSE, 3000);
 }
 
 function addLog(entry) {
   if (entry.ping) return;
-  const box = document.getElementById('log');
+  const box  = document.getElementById('log');
   const line = document.createElement('div');
   line.className = `ll ${entry.level||'info'}`;
   line.innerHTML = `<span class="ts">${entry.time}</span>${entry.msg}`;
   box.appendChild(line);
   box.scrollTop = box.scrollHeight;
-  logCount++;
-  document.getElementById('logCount').textContent = `${logCount} lines`;
+  document.getElementById('logCount').textContent = `${++logCount} שורות`;
 }
 
 function clearLogs() {
-  document.getElementById('log').innerHTML = '';
-  logCount = 0;
-  document.getElementById('logCount').textContent = '0 lines';
+  document.getElementById('log').innerHTML=''; logCount=0;
+  document.getElementById('logCount').textContent='0 שורות';
 }
 
 function now() { return new Date().toTimeString().slice(0,8); }
