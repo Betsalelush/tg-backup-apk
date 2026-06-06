@@ -16,9 +16,14 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templat
 
 LOG_Q  = queue.Queue(maxsize=500)
 STATUS = {"running": False, "paused": False, "engine": None, "thread": None}
-AUTH_STATE = {}  # client_name -> {"client", "hash", "status": pending_code|pending_pw|connected|error}
+AUTH_STATE = {}
 
-DEFAULT_CFG = {"accounts": [], "source_chat_id": "", "target_chat_id": ""}
+DEFAULT_CFG = {
+    "accounts": [],
+    "source_chat_id": "",
+    "target_chat_id": "",
+    "media_type": "video_doc",  # video_doc | photo | all_media | text | all
+}
 
 # loop קבוע אחד לכל פעולות Telethon
 _TG_LOOP = asyncio.new_event_loop()
@@ -59,8 +64,21 @@ def _run_async(coro):
     future = asyncio.run_coroutine_threadsafe(coro, _TG_LOOP)
     return future.result(timeout=60)
 
+def _msg_matches(msg, media_type):
+    if media_type == "video_doc":
+        return (msg.video or msg.document) and not (msg.sticker or msg.photo)
+    if media_type == "photo":
+        return bool(msg.photo)
+    if media_type == "all_media":
+        return bool(msg.media) and not msg.sticker
+    if media_type == "text":
+        return bool(msg.text) and not msg.media
+    if media_type == "all":
+        return True
+    return False
 
-# ── Auth helpers ──────────────────────────────────────────────────────────────
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 async def _auth_send_code(acc):
     from telethon import TelegramClient
@@ -82,9 +100,8 @@ async def _auth_verify_code(acc, code):
     phone = acc["phone_number"]
     state = AUTH_STATE.get(name)
     if not state: return {"ok": False, "msg": "No pending auth"}
-    client = state["client"]
     try:
-        await client.sign_in(phone, code, phone_code_hash=state["hash"])
+        await state["client"].sign_in(phone, code, phone_code_hash=state["hash"])
         AUTH_STATE[name]["status"] = "connected"
         return {"ok": True}
     except errors.SessionPasswordNeededError:
@@ -116,15 +133,24 @@ class BackupEngine:
         self._pause_event.set()
         self.running = False
 
-    def pause(self):  self._pause_event.clear(); _log("Paused.", "warn")
-    def resume(self): self._pause_event.set();   _log("Resumed.", "success")
-    def stop(self):   self.running = False;       self._pause_event.set()
+    def pause(self):
+        _TG_LOOP.call_soon_threadsafe(self._pause_event.clear)
+        _log("Paused.", "warn")
+
+    def resume(self):
+        _TG_LOOP.call_soon_threadsafe(self._pause_event.set)
+        _log("Resumed.", "success")
+
+    def stop(self):
+        self.running = False
+        _TG_LOOP.call_soon_threadsafe(self._pause_event.set)
 
     async def run(self):
         from telethon import TelegramClient, errors
         self.running = True
-        source = int(self.config["source_chat_id"])
-        target = int(self.config["target_chat_id"])
+        source     = int(self.config["source_chat_id"])
+        target     = int(self.config["target_chat_id"])
+        media_type = self.config.get("media_type", "video_doc")
 
         clients = []
         for acc in self.config.get("accounts", []):
@@ -152,7 +178,7 @@ class BackupEngine:
             _log("No authorized accounts — aborting.", "error")
             self.running = False; STATUS["running"] = False; return
 
-        _log(f"Active — {source} → {target}", "info")
+        _log(f"Active [{media_type}] — {source} → {target}", "info")
         idx = 0
 
         while self.running:
@@ -166,11 +192,14 @@ class BackupEngine:
                     if not self.running: break
                     await self._pause_event.wait()
                     if msg.id > last_proc: last_proc = msg.id
-                    has_media = (msg.video or msg.document) and not (msg.sticker or msg.photo)
-                    if has_media:
+
+                    if _msg_matches(msg, media_type):
                         try:
                             caption = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+|@\S+", "", msg.text or "").strip()
-                            await client.send_message(target, caption, file=msg.media)
+                            if msg.media:
+                                await client.send_message(target, caption, file=msg.media)
+                            else:
+                                await client.send_message(target, caption)
                             _log(f"[Acc {idx+1}] Copied msg {msg.id}", "success")
                             batch += 1
                             await asyncio.sleep(random.uniform(1.4, 3.8))
@@ -183,7 +212,8 @@ class BackupEngine:
                         except Exception as exc:
                             _log(f"Error msg {msg.id}: {exc}", "error")
                     else:
-                        _log(f"[Acc {idx+1}] Skip {msg.id} (no media)", "warn")
+                        _log(f"[Acc {idx+1}] Skip {msg.id}", "warn")
+
                 if last_proc > last_id:
                     _save_last_id(last_proc)
                 idx = (idx + 1) % len(clients)
@@ -194,7 +224,7 @@ class BackupEngine:
         for c in clients:
             try: await c.disconnect()
             except Exception: pass
-        _log("Disconnected.", "info")
+        _log("Stopped.", "info")
         STATUS["running"] = False
 
 
@@ -210,67 +240,44 @@ def _start_worker(config):
     STATUS["thread"] = t; t.start()
 
 
-# ── Flask app ─────────────────────────────────────────────────────────────────
+# ── Flask ─────────────────────────────────────────────────────────────────────
 
 def create_app():
     app = Flask(__name__, template_folder=TEMPLATE_DIR)
 
     @app.route("/")
-    def index():
-        return render_template("index.html", config=_load_cfg())
+    def index(): return render_template("index.html", config=_load_cfg())
 
     @app.route("/config", methods=["POST"])
-    def update_config():
-        _save_cfg(request.json); return jsonify({"ok": True})
+    def update_config(): _save_cfg(request.json); return jsonify({"ok": True})
 
     @app.route("/auth/send_code", methods=["POST"])
     def auth_send_code():
-        data = request.json
-        cfg  = _load_cfg()
-        idx  = data.get("acc_idx", 0)
-        if idx >= len(cfg["accounts"]):
-            return jsonify({"ok": False, "msg": "Account not found"})
+        data = request.json; cfg = _load_cfg(); idx = data.get("acc_idx", 0)
+        if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
         acc = cfg["accounts"][idx]
         if not acc.get("api_id") or not acc.get("phone_number"):
             return jsonify({"ok": False, "msg": "Fill API ID and Phone first"})
-        try:
-            result = _run_async(_auth_send_code(acc))
-            return jsonify(result)
-        except Exception as e:
-            return jsonify({"ok": False, "msg": str(e)})
+        try: return jsonify(_run_async(_auth_send_code(acc)))
+        except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
     @app.route("/auth/verify", methods=["POST"])
     def auth_verify():
-        data = request.json
-        cfg  = _load_cfg()
-        idx  = data.get("acc_idx", 0)
-        if idx >= len(cfg["accounts"]):
-            return jsonify({"ok": False, "msg": "Account not found"})
-        try:
-            result = _run_async(_auth_verify_code(cfg["accounts"][idx], data.get("code", "")))
-            return jsonify(result)
-        except Exception as e:
-            return jsonify({"ok": False, "msg": str(e)})
+        data = request.json; cfg = _load_cfg(); idx = data.get("acc_idx", 0)
+        if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
+        try: return jsonify(_run_async(_auth_verify_code(cfg["accounts"][idx], data.get("code", ""))))
+        except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
     @app.route("/auth/password", methods=["POST"])
     def auth_password():
-        data = request.json
-        cfg  = _load_cfg()
-        idx  = data.get("acc_idx", 0)
-        if idx >= len(cfg["accounts"]):
-            return jsonify({"ok": False, "msg": "Account not found"})
-        try:
-            result = _run_async(_auth_password(cfg["accounts"][idx], data.get("password", "")))
-            return jsonify(result)
-        except Exception as e:
-            return jsonify({"ok": False, "msg": str(e)})
+        data = request.json; cfg = _load_cfg(); idx = data.get("acc_idx", 0)
+        if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
+        try: return jsonify(_run_async(_auth_password(cfg["accounts"][idx], data.get("password", ""))))
+        except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
     @app.route("/auth/status")
     def auth_status():
-        out = {}
-        for name, state in AUTH_STATE.items():
-            out[name] = state.get("status", "unknown")
-        return jsonify(out)
+        return jsonify({n: s.get("status", "unknown") for n, s in AUTH_STATE.items()})
 
     @app.route("/start", methods=["POST"])
     def start():
@@ -282,12 +289,12 @@ def create_app():
         _log("Starting…", "info"); _start_worker(cfg)
         return jsonify({"ok": True})
 
-    @app.route("/stop",   methods=["POST"])
+    @app.route("/stop", methods=["POST"])
     def stop():
         if STATUS.get("engine"): STATUS["engine"].stop()
         STATUS["running"] = False; _log("Stopping…", "warn"); return jsonify({"ok": True})
 
-    @app.route("/pause",  methods=["POST"])
+    @app.route("/pause", methods=["POST"])
     def pause():
         if STATUS.get("engine"): STATUS["engine"].pause(); STATUS["paused"] = True
         return jsonify({"ok": True})

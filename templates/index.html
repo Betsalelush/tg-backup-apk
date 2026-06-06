@@ -136,6 +136,16 @@
     <label>יעד — Chat ID (להעתיק אליו)</label>
     <input id="tgt" type="text" placeholder="-1009876543210">
   </div>
+  <div class="field">
+    <label>סוג הודעות להעתיק</label>
+    <select id="mediaType" style="width:100%;padding:9px 10px;border-radius:5px;border:1px solid #bbb;background:#fff;color:#111;font-size:14px">
+      <option value="video_doc">וידאו + קבצים בלבד</option>
+      <option value="photo">תמונות בלבד</option>
+      <option value="all_media">כל המדיה (ללא מדבקות)</option>
+      <option value="text">טקסט בלבד</option>
+      <option value="all">הכל</option>
+    </select>
+  </div>
   <div class="info-box">
     <strong>הודעה אחרונה שעובדה:</strong><br>
     <span class="big-num" id="lastIdVal">0</span>
@@ -162,6 +172,7 @@ let authStatus = {};
 function init() {
   document.getElementById('src').value = cfg.source_chat_id || '';
   document.getElementById('tgt').value = cfg.target_chat_id || '';
+  if (cfg.media_type) document.getElementById('mediaType').value = cfg.media_type;
   buildAccUI();
   pollStatus();
   setInterval(pollStatus, 2500);
@@ -312,6 +323,7 @@ function gatherConfig() {
     })),
     source_chat_id: document.getElementById('src').value.trim(),
     target_chat_id: document.getElementById('tgt').value.trim(),
+    media_type: document.getElementById('mediaType').value,
   };
 }
 
