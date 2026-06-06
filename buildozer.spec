@@ -27,8 +27,7 @@ android.permissions = INTERNET, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE
 # Use a single architecture for faster build; add arm64-v8a for modern devices
 android.archs = arm64-v8a, armeabi-v7a
 
-# App icon (optional — add icon.png to project root for custom icon)
-# icon.filename = icon.png
+icon.filename = icon.png
 
 # Fullscreen
 fullscreen = 0
