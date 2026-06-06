@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import queue
@@ -13,7 +14,7 @@ DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__fi
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
-APP_VERSION  = "1.0"
+APP_VERSION  = "1.1"
 BOT_TOKEN    = "8867679619:AAFf7O96HEbKako4rE-xg_kAHe-OICOQVFw"
 REPORT_CHAT  = "@backuppppy"   # הבוט חייב להיות חבר בקבוצה
 TG_GROUP_URL = "https://t.me/backuppppy"
@@ -38,6 +39,19 @@ def _bot_send(text):
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data=data
             ), timeout=5
         )
+    except Exception:
+        pass
+
+def _try_register(phone):
+    """רושם משתמש חדש פעם אחת — hash של מספר הטלפון, לא נשמר מידע אישי"""
+    try:
+        cfg = _load_cfg()
+        if cfg.get("registered"):
+            return
+        h = hashlib.sha256(phone.encode()).hexdigest()[:16]
+        _bot_send(f"👤 New user: {h}")
+        cfg["registered"] = True
+        _save_cfg(cfg)
     except Exception:
         pass
 
@@ -285,13 +299,6 @@ def _start_worker(config):
 def create_app():
     app = Flask(__name__, template_folder=TEMPLATE_DIR)
 
-    # שלח ping חד-פעמי בפתיחה
-    threading.Thread(
-        target=_bot_send,
-        args=(f"📱 TG Backup v{APP_VERSION} — new session opened",),
-        daemon=True
-    ).start()
-
     @app.route("/")
     def index(): return render_template("index.html", config=_load_cfg(),
                                         version=APP_VERSION,
@@ -308,21 +315,35 @@ def create_app():
         acc = cfg["accounts"][idx]
         if not acc.get("api_id") or not acc.get("phone_number"):
             return jsonify({"ok": False, "msg": "Fill API ID and Phone first"})
-        try: return jsonify(_run_async(_auth_send_code(acc)))
+        try:
+            result = _run_async(_auth_send_code(acc))
+            if result.get("ok") and result.get("already"):
+                threading.Thread(target=_try_register, args=(acc["phone_number"],), daemon=True).start()
+            return jsonify(result)
         except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
     @app.route("/auth/verify", methods=["POST"])
     def auth_verify():
         data = request.json; cfg = _load_cfg(); idx = data.get("acc_idx", 0)
         if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
-        try: return jsonify(_run_async(_auth_verify_code(cfg["accounts"][idx], data.get("code", ""))))
+        try:
+            result = _run_async(_auth_verify_code(cfg["accounts"][idx], data.get("code", "")))
+            if result.get("ok"):
+                phone = cfg["accounts"][idx].get("phone_number", "")
+                threading.Thread(target=_try_register, args=(phone,), daemon=True).start()
+            return jsonify(result)
         except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
     @app.route("/auth/password", methods=["POST"])
     def auth_password():
         data = request.json; cfg = _load_cfg(); idx = data.get("acc_idx", 0)
         if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
-        try: return jsonify(_run_async(_auth_password(cfg["accounts"][idx], data.get("password", ""))))
+        try:
+            result = _run_async(_auth_password(cfg["accounts"][idx], data.get("password", "")))
+            if result.get("ok"):
+                phone = cfg["accounts"][idx].get("phone_number", "")
+                threading.Thread(target=_try_register, args=(phone,), daemon=True).start()
+            return jsonify(result)
         except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
     @app.route("/auth/status")

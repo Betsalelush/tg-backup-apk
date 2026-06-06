@@ -162,6 +162,31 @@
     <label>התחל מהודעה מספר (0 = המשך מהמקום האחרון)</label>
     <input id="startFromId" type="number" min="0" placeholder="0" value="0">
   </div>
+
+  <!-- Help -->
+  <div style="margin-top:14px;border-top:1px solid #eee;padding-top:12px">
+    <button class="sm" style="background:#1565c0;color:#fff;border-color:#1565c0" onclick="toggleHelp()">❓ עזרה</button>
+  </div>
+  <div id="helpSection" style="display:none;margin-top:12px">
+    <div style="font-weight:700;color:#1565c0;margin-bottom:6px;font-size:.95rem">איך מקבלים API ID ו-API Hash?</div>
+    <div style="font-size:.82rem;color:#333;line-height:1.8;background:#f0f8ff;border-radius:6px;padding:10px;border:1px solid #90caf9">
+      1. כנס לאתר <strong>my.telegram.org</strong> מדפדפן<br>
+      2. הכנס את מספר הטלפון שלך ואמת עם הקוד<br>
+      3. לחץ על <strong>"API development tools"</strong><br>
+      4. מלא שם ושם קצר לאפליקציה (כל שם)<br>
+      5. לחץ <strong>"Create application"</strong><br>
+      6. תקבל <strong>App api_id</strong> (מספר) ו-<strong>App api_hash</strong> (מחרוזת)<br>
+      7. העתק אותם לשדות המתאימים בלשונית "חשבונות"
+    </div>
+    <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
+    <div style="font-weight:700;color:#1565c0;margin-bottom:6px;font-size:.95rem">איך מוצאים ID של ערוץ או קבוצה?</div>
+    <p style="font-size:.82rem;color:#555;margin-bottom:8px">שלח הודעה לבוט הבא והוא יחזיר את ה-ID:</p>
+    <a href="https://t.me/GetChatID_IL_BOT?start=start" target="_blank"
+       style="display:inline-block;background:#1565c0;color:#fff;padding:8px 16px;border-radius:5px;text-decoration:none;font-weight:700;font-size:.9rem">
+      GetChatID Bot
+    </a>
+    <p style="font-size:.78rem;color:#888;margin-top:6px">העתק הודעה מהערוץ/קבוצה לבוט — הוא יחזיר מספר שלילי כמו -100xxxxxxxxxx</p>
+  </div>
 </div>
 
 <!-- Logs -->
@@ -190,48 +215,23 @@
 
   <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
 
-  <!-- פרטיות -->
-  <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">פרטיות</div>
-  <p style="font-size:.82rem;color:#555;line-height:1.6">
-    האפליקציה שולחת לקבוצת הטלגרם מידע אנונימי בלבד:<br>
-    • הודעה בכל פתיחת סשן (לספירת משתמשים פעילים)<br>
-    • שגיאות קריטיות בלבד (ללא מידע אישי)<br><br>
-    לא נשמר ולא נשלח: מספרי טלפון, תוכן הודעות, פרטי חשבון, או כל מידע מזהה.
-  </p>
-
-  <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
-
-  <!-- קבלת API ID ו-API Hash -->
-  <div style="font-weight:700;color:#1565c0;margin-bottom:6px;font-size:.95rem">איך מקבלים API ID ו-API Hash?</div>
-  <div style="font-size:.82rem;color:#333;line-height:1.8;background:#f0f8ff;border-radius:6px;padding:10px;border:1px solid #90caf9">
-    1. כנס לאתר <strong>my.telegram.org</strong> מדפדפן<br>
-    2. הכנס את מספר הטלפון שלך ואמת עם הקוד<br>
-    3. לחץ על <strong>"API development tools"</strong><br>
-    4. מלא שם ושם קצר לאפליקציה (כל שם)<br>
-    5. לחץ <strong>"Create application"</strong><br>
-    6. תקבל <strong>App api_id</strong> (מספר) ו-<strong>App api_hash</strong> (מחרוזת)<br>
-    7. העתק אותם לשדות המתאימים בלשונית "חשבונות"
-  </div>
-
-  <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
-
-  <!-- קבלת Chat ID -->
-  <div style="font-weight:700;color:#1565c0;margin-bottom:6px;font-size:.95rem">איך מוצאים ID של ערוץ או קבוצה?</div>
-  <p style="font-size:.82rem;color:#555;margin-bottom:8px">שלח הודעה לבוט הבא והוא יחזיר את ה-ID:</p>
-  <a href="https://t.me/GetChatID_IL_BOT?start=start" target="_blank"
-     style="display:inline-block;background:#1565c0;color:#fff;padding:8px 16px;border-radius:5px;text-decoration:none;font-weight:700;font-size:.9rem">
-    GetChatID Bot
-  </a>
-  <p style="font-size:.78rem;color:#888;margin-top:6px">העתק הודעה מהערוץ/קבוצה לבוט — הוא יחזיר מספר שלילי כמו -100xxxxxxxxxx</p>
-
-  <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
-
   <!-- קוד פתוח -->
   <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">קוד פתוח</div>
   <a href="{{ github }}" target="_blank"
      style="display:inline-block;background:#333;color:#fff;padding:8px 16px;border-radius:5px;text-decoration:none;font-weight:700;font-size:.9rem">
     GitHub
   </a>
+
+  <hr style="border:none;border-top:1px solid #ddd;margin:14px 0">
+
+  <!-- פרטיות -->
+  <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">פרטיות</div>
+  <p style="font-size:.82rem;color:#555;line-height:1.6">
+    האפליקציה שולחת לקבוצת הטלגרם מידע אנונימי בלבד:<br>
+    • רישום חד-פעמי בהתחברות הראשונה (hash אנונימי, ללא פרטים מזהים)<br>
+    • שגיאות קריטיות בלבד (ללא מידע אישי)<br><br>
+    לא נשמר ולא נשלח: מספרי טלפון, תוכן הודעות, פרטי חשבון, או כל מידע מזהה.
+  </p>
 </div>
 
 <script>
@@ -483,6 +483,11 @@ function clearLogs() {
 }
 
 function now() { return new Date().toTimeString().slice(0,8); }
+
+function toggleHelp() {
+  const s = document.getElementById('helpSection');
+  s.style.display = s.style.display === 'none' ? 'block' : 'none';
+}
 
 init();
 </script>
