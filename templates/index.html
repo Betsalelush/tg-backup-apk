@@ -301,7 +301,9 @@ function buildAccUI() {
 }
 
 function buildConnForm(i, st) {
-  if (st === 'connected') return '<p style="color:#2e7d32;font-size:.85rem;margin-top:4px">✔ החשבון מחובר ומוכן</p>';
+  if (st === 'connected') return `
+    <p style="color:#2e7d32;font-size:.85rem;margin-top:4px">✔ החשבון מחובר ומוכן</p>
+    <button class="sm btn-del" style="margin-top:6px" onclick="disconnectAccount(${i})">🔌 נתק</button>`;
   if (st === 'pending_code') return `
     <div class="conn-row" style="margin-top:6px">
       <input id="code${i}" type="number" placeholder="קוד אימות מהטלגרם">
@@ -358,6 +360,12 @@ async function verifyCode(i) {
   if (r.ok) { updateConnStatus(i,'connected'); return; }
   if (r.need_password) { updateConnStatus(i,'pending_pw'); return; }
   updateConnStatus(i,'error'); addLog({time:now(),level:'error',msg:r.msg});
+}
+
+async function disconnectAccount(i) {
+  if (!confirm('לנתק את החשבון? תצטרך להתחבר מחדש עם קוד.')) return;
+  const r = await (await fetch('/auth/disconnect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({acc_idx:i})})).json();
+  if (r.ok) { updateConnStatus(i,'unknown'); addLog({time:now(),level:'warn',msg:`חשבון ${i+1} נותק`}); }
 }
 
 async function sendPassword(i) {

@@ -164,6 +164,22 @@ async def _auth_password(acc, pw):
         AUTH_STATE[name]["status"] = "error"
         return {"ok": False, "msg": str(e)}
 
+async def _auth_disconnect(acc):
+    name = acc["client_name"]
+    state = AUTH_STATE.get(name)
+    try:
+        if state and state.get("client"):
+            await state["client"].log_out()
+    except Exception:
+        pass
+    AUTH_STATE.pop(name, None)
+    session_path = os.path.join(DATA_DIR, name + ".session")
+    try:
+        os.remove(session_path)
+    except Exception:
+        pass
+    return {"ok": True}
+
 
 # ── Backup engine ─────────────────────────────────────────────────────────────
 
@@ -344,6 +360,13 @@ def create_app():
                 phone = cfg["accounts"][idx].get("phone_number", "")
                 threading.Thread(target=_try_register, args=(phone,), daemon=True).start()
             return jsonify(result)
+        except Exception as e: return jsonify({"ok": False, "msg": str(e)})
+
+    @app.route("/auth/disconnect", methods=["POST"])
+    def auth_disconnect():
+        data = request.json; cfg = _load_cfg(); idx = data.get("acc_idx", 0)
+        if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
+        try: return jsonify(_run_async(_auth_disconnect(cfg["accounts"][idx])))
         except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
     @app.route("/auth/status")
