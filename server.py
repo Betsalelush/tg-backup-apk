@@ -20,6 +20,10 @@ AUTH_STATE = {}  # client_name -> {"client", "hash", "status": pending_code|pend
 
 DEFAULT_CFG = {"accounts": [], "source_chat_id": "", "target_chat_id": ""}
 
+# loop קבוע אחד לכל פעולות Telethon
+_TG_LOOP = asyncio.new_event_loop()
+threading.Thread(target=_TG_LOOP.run_forever, daemon=True).start()
+
 
 def _load_cfg():
     if os.path.exists(CONFIG_FILE):
@@ -52,9 +56,8 @@ def _log(msg, level="info"):
         LOG_Q.put_nowait(entry)
 
 def _run_async(coro):
-    loop = asyncio.new_event_loop()
-    try: return loop.run_until_complete(coro)
-    finally: loop.close()
+    future = asyncio.run_coroutine_threadsafe(coro, _TG_LOOP)
+    return future.result(timeout=60)
 
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
@@ -199,10 +202,10 @@ def _start_worker(config):
     engine = BackupEngine(config)
     STATUS["engine"] = engine
     def _run():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try: loop.run_until_complete(engine.run())
-        finally: loop.close(); STATUS["running"] = False
+        future = asyncio.run_coroutine_threadsafe(engine.run(), _TG_LOOP)
+        try: future.result()
+        except Exception as e: _log(f"Worker error: {e}", "error")
+        finally: STATUS["running"] = False
     t = threading.Thread(target=_run, daemon=True)
     STATUS["thread"] = t; t.start()
 
