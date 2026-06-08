@@ -6,6 +6,7 @@ import os
 import queue
 import random
 import re
+import shutil
 import threading
 from datetime import datetime
 
@@ -27,12 +28,14 @@ AUTH_STATE = {}
 
 
 def _bot_send(text):
-    """שולח הודעה לבוט — לעולם לא זורק שגיאה"""
+    """שולח הודעה לבוט — לעולם לא זורק שגיאה.
+    כל הודעה (כולל דיווחי שגיאה/דיבאג) כוללת את גרסת האפליקציה בסוף,
+    כדי שאפשר יהיה לדעת מאיזו גרסה הגיע כל דיווח."""
     try:
         import urllib.request, urllib.parse
         data = urllib.parse.urlencode({
             "chat_id": REPORT_CHAT,
-            "text": text,
+            "text": f"{text}\n\n— גרסה {APP_VERSION}",
             "disable_notification": "true"
         }).encode()
         urllib.request.urlopen(
@@ -68,6 +71,54 @@ _TG_LOOP = asyncio.new_event_loop()
 threading.Thread(target=_TG_LOOP.run_forever, daemon=True).start()
 
 
+def _migrate_to_jobs(cfg):
+    """מיגרציה חד-פעמית מתצורה ישנה (מקור/יעד יחיד, מ-v1.1 ומטה) לרשימת jobs.
+    קריטי: מעתיקה גם את קבצי ההתקדמות הקיימים לשמות החדשים (job-keyed) —
+    אחרת המשימה הממוגרת הייתה 'שוכחת' איפה הפסיקה ומתחילה לסרוק את הערוץ
+    מהודעה 0, מה שנראה כאילו 'האפליקציה לא מעבירה הודעות' (היא פשוט
+    מדלגת מחדש על אלפי הודעות ישנות). שומרת את התוצאה לדיסק כדי שזה ירוץ פעם אחת בלבד."""
+    job_key = "migrated"
+    try:
+        source = int(cfg.get("source_chat_id") or 0)
+    except (TypeError, ValueError):
+        source = 0
+    n = len(cfg.get("accounts", []))
+
+    if source:
+        old_simple = os.path.join(DATA_DIR, f"last_id_{source}.txt")
+        new_simple = _last_id_path(job_key, source)
+        if os.path.exists(old_simple) and not os.path.exists(new_simple):
+            try: shutil.copy(old_simple, new_simple)
+            except Exception: pass
+        for i in range(n):
+            old_part = os.path.join(DATA_DIR, f"last_id_{source}_part{n}_{i}.txt")
+            new_part = _worker_id_path(job_key, source, i, n)
+            if os.path.exists(old_part) and not os.path.exists(new_part):
+                try: shutil.copy(old_part, new_part)
+                except Exception: pass
+
+    job = {
+        "id": job_key,
+        "name": "משימה 1",
+        "source_chat_id": cfg.get("source_chat_id", ""),
+        "target_chat_id": cfg.get("target_chat_id", ""),
+        "media_type": cfg.get("media_type", "video_doc"),
+        "start_from_id": cfg.get("start_from_id", 0),
+        "account_indices": list(range(n)),
+        "mode": "fast",
+    }
+    new_cfg = dict(cfg)
+    for k in ("source_chat_id", "target_chat_id", "media_type", "start_from_id"):
+        new_cfg.pop(k, None)
+    new_cfg["jobs"] = [job]
+    try:
+        _save_cfg(new_cfg)
+    except Exception:
+        pass
+    _log("שודרגה תצורת ההגדרות לפורמט המשימות (v1.2) — ההתקדמות הקיימת נשמרה והועברה.", "info")
+    return new_cfg
+
+
 def _load_cfg():
     if os.path.exists(CONFIG_FILE):
         try:
@@ -76,16 +127,7 @@ def _load_cfg():
             out = DEFAULT_CFG.copy(); out.update(d)
             # מיגרציה מתצורה ישנה (מקור/יעד יחיד) למשימה ראשונה ברשימת jobs
             if not out.get("jobs") and out.get("source_chat_id") and out.get("target_chat_id"):
-                out["jobs"] = [{
-                    "id": "migrated",
-                    "name": "משימה 1",
-                    "source_chat_id": out.get("source_chat_id", ""),
-                    "target_chat_id": out.get("target_chat_id", ""),
-                    "media_type": out.get("media_type", "video_doc"),
-                    "start_from_id": out.get("start_from_id", 0),
-                    "account_indices": list(range(len(out.get("accounts", [])))),
-                    "mode": "fast",
-                }]
+                out = _migrate_to_jobs(out)
             return out
         except Exception: pass
     return DEFAULT_CFG.copy()
@@ -117,6 +159,27 @@ def _load_worker_id(job_key, source_id, idx, total):
         with open(_worker_id_path(job_key, source_id, idx, total)) as f: return int(f.read().strip())
     except Exception:
         return _load_last_id(job_key, source_id)
+
+def _wave_path(job_key, source_id):
+    return os.path.join(DATA_DIR, f"wave_job{job_key}_{source_id}.txt")
+
+def _save_wave(start, end, job_key, source_id):
+    """שומר את גבולות ה'גל' הנוכחי (טווח ID רציף שמתחלק בין החשבונות במצב מהיר),
+    כדי שאם האפליקציה נסגרת באמצע גל — הגל יתחדש מאותם גבולות בדיוק (ולא יחושב
+    מחדש לפי 'הודעה אחרונה' עדכנית, שעלולה לשנות את חלוקת הטווחים בין החשבונות)."""
+    with open(_wave_path(job_key, source_id), "w") as f: f.write(f"{start},{end}")
+
+def _load_wave(job_key, source_id):
+    try:
+        with open(_wave_path(job_key, source_id)) as f:
+            a, b = f.read().strip().split(",")
+            return (int(a), int(b))
+    except Exception:
+        return None
+
+def _clear_wave(job_key, source_id):
+    try: os.remove(_wave_path(job_key, source_id))
+    except Exception: pass
 
 def _job_progress(job, total_accounts):
     """ערך 'התקדמות' תצוגתי למשימה — לפי המצב שלה ומספר החשבונות שמוקצים לה."""
@@ -298,14 +361,14 @@ class BackupEngine:
                 pass
 
     async def _worker(self, client, idx, total, job_tag, job_key, source, target, media_type, protected, tmp_dir, limiter):
-        """לולאת עבודה של חשבון אחד בתוך משימה — מטפל רק בהודעות עם msg.id % total == idx,
-        כך שהמשימה מתחלקת בין כל החשבונות שהוקצו לה והם פועלים בו-זמנית (asyncio.gather ב-run).
-        זהו מצב 'מהיר/מבולגן' (גם עבור חשבון בודד, כש-total==1).
+        """לולאת עבודה רציפה לחשבון יחיד שאחראי על *כל* ערוץ המקור (total תמיד 1 כאן —
+        עבור משימות עם כמה חשבונות במצב מהיר משתמשים ב-_run_fast_job/_range_worker
+        שמחלקים טווחי-ID רציפים, ובמצב מסודר ב-_run_ordered_job).
+        ממשיך מ-offset_id=last_id קדימה ברצף, בלי שום 'סריקה' מההתחלה.
         במצב מוגן (הורדה+העלאה) לא מחילים את עיכובי ההאטה הרגילים — הם נועדו לערוצים
         רגילים בלבד; בערוץ מוגן ההורדה/העלאה כבר איטית מספיק מצד עצמה.
-        limiter — תקרת קצב נוספת (25/דקה) ייעודית *לחשבון הזה בלבד* (לא משותפת
-        בין חשבונות); מופעלת רק עבור חשבון יחיד או מצב מהיר, ראו run().
-        מצטרפת *מעבר* לעיכובים הרגילים, לא במקומם."""
+        limiter — תקרת קצב נוספת (25/דקה) ייעודית *לחשבון הזה בלבד*; מצטרפת
+        *מעבר* לעיכובים הרגילים, לא במקומם — ראו run()."""
         from telethon import errors
         tag = f"{job_tag} · Acc {idx+1}"
         while self.running:
@@ -363,6 +426,141 @@ class BackupEngine:
                 _log(f"[{tag}] Error: {exc}", "error")
                 threading.Thread(target=_bot_send, args=(f"⚠️ TG Backup error ({tag}):\n{exc}",), daemon=True).start()
                 await asyncio.sleep(30)
+
+    async def _range_worker(self, client, idx, total, job_tag, job_key, source, target, media_type,
+                            protected, tmp_dir, limiter, range_start, range_end):
+        """עובד עם טווח-ID קבוע ורציף (range_start..range_end) — קופץ ישירות
+        (offset_id) להודעה הראשונה בטווח שלו וממשיך משם בלבד. לעולם לא נוגע
+        בהודעה שמחוץ לטווח שלו — לא של חשבון אחר ולא 'לפני' נקודת ההתחלה —
+        כך שאין שום סריקה כפולה/מבוזבזת על תוכן ששייך למישהו אחר.
+        בסיום הטווח החשבון פשוט מסיים (ה'גל' הבא ב-_run_fast_job יקצה לו טווח חדש)."""
+        from telethon import errors
+        tag = f"{job_tag} · Acc {idx+1}"
+        last_id = max(range_start - 1, _load_worker_id(job_key, source, idx, total))
+        if last_id >= range_end:
+            return
+        _log(f"[{tag}] קופץ ישירות להודעה {last_id+1} (טווח {range_start}–{range_end} — בלי לסרוק טווחים אחרים)", "info")
+        reached_end = False
+        while self.running and not reached_end:
+            await self._wait_if_paused()
+            if not self.running: break
+            last_proc = last_id
+            try:
+                async for msg in client.iter_messages(source, offset_id=last_id, reverse=True, limit=50):
+                    if not self.running: break
+                    await self._wait_if_paused()
+                    if not self.running: break
+                    if msg.id > range_end:
+                        reached_end = True
+                        break
+                    if msg.id > last_proc: last_proc = msg.id
+
+                    if _msg_matches(msg, media_type):
+                        try:
+                            caption = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+|@\S+", "", msg.text or "").strip()
+                            if limiter:
+                                await limiter.acquire()
+                            if not msg.media:
+                                await client.send_message(target, caption)
+                            elif protected:
+                                await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
+                            else:
+                                try:
+                                    await client.send_message(target, caption, file=msg.media)
+                                except Exception as exc:
+                                    if "protected chat" in str(exc).lower():
+                                        protected = True
+                                        _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה, ללא הגבלות שניות (תקרת הקצב הנוספת אם פעילה — נשארת)", "warn")
+                                        await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
+                                    else:
+                                        raise
+                            STATUS["transferred"] += 1
+                            _log(f"[{tag}] Copied msg {msg.id} — סה\"כ: {STATUS['transferred']}", "success")
+                            if not protected:
+                                await asyncio.sleep(random.uniform(1.4, 3.8))
+                        except errors.FloodWaitError as exc:
+                            _log(f"[{tag}] FloodWait {exc.seconds}s", "warn")
+                            _save_worker_id(last_proc, job_key, source, idx, total)
+                            await asyncio.sleep(exc.seconds + 1)
+                        except Exception as exc:
+                            _log(f"[{tag}] Error msg {msg.id}: {exc}", "error")
+                    else:
+                        _log(f"[{tag}] Skip {msg.id}", "warn")
+                else:
+                    # אין יותר הודעות זמינות בטווח — סיימנו אותו
+                    reached_end = True
+
+                if last_proc > last_id:
+                    _save_worker_id(last_proc, job_key, source, idx, total)
+                last_id = last_proc
+                if not reached_end and not protected:
+                    await asyncio.sleep(random.uniform(2, 6))
+            except Exception as exc:
+                _log(f"[{tag}] Error: {exc}", "error")
+                threading.Thread(target=_bot_send, args=(f"⚠️ TG Backup error ({tag}):\n{exc}",), daemon=True).start()
+                await asyncio.sleep(30)
+
+        if reached_end:
+            _save_worker_id(range_end, job_key, source, idx, total)
+            _log(f"[{tag}] סיים את הטווח שלו ({range_start}–{range_end}) — ממתין לגל הבא", "info")
+
+    async def _run_fast_job(self, job_tag, job_key, clients, source, target, media_type, protected, tmp_dir, use_limiter):
+        """מצב 'מהיר/מבולגן' עם כמה חשבונות — עובד ב'סבבים' קטנים וקבועים:
+        בכל סבב כל חשבון מקבל טווח-ID **רציף וקבוע בגודלו — 25 הודעות בדיוק**
+        (לא טווח גדול ומשתנה שנקבע לפי כמות ההודעות החדשות שהצטברו). חשבון 1
+        מקבל את 25 ההודעות הראשונות מנקודת ההמשך, חשבון 2 את ה-25 שאחריו וכו'.
+        כל חשבון קופץ ישירות (offset_id) לתחילת החלק שלו ועובד אך ורק עליו
+        (_range_worker) — בלי לגעת בהודעה אחת שמחוץ לטווח שלו. בסיום הסבב כולם
+        מתקדמים יחד לסבב הבא (25 הודעות נוספות לכל אחד), וכן הלאה — ברצף, בלי
+        סריקה חוזרת ובלי בזבוז על תוכן ששייך לחשבון אחר (בניגוד לחלוקה לפי
+        modulo, id % n, שגרמה לכל חשבון לעבור על כל הערוץ ולזרוק את רוב מה
+        שהוא רואה)."""
+        n = len(clients)
+        chunk_size = 25
+        while self.running:
+            await self._wait_if_paused()
+            if not self.running: break
+
+            base = _load_last_id(job_key, source)
+            wave = _load_wave(job_key, source)
+            if wave and wave[1] > base:
+                wave_start, wave_end = wave
+                _log(f"[{job_tag}] ממשיך סבב קיים: הודעות {wave_start}–{wave_end}", "info")
+            else:
+                try:
+                    latest_msgs = await clients[0].get_messages(source, limit=1)
+                    latest = latest_msgs[0].id if latest_msgs else base
+                except Exception as exc:
+                    _log(f"[{job_tag}] שגיאה בבדיקת ההודעה האחרונה בערוץ: {exc}", "error")
+                    await asyncio.sleep(30)
+                    continue
+                if latest <= base:
+                    _log(f"[{job_tag}] אין הודעות חדשות כרגע בערוץ — בודק שוב בעוד דקה", "info")
+                    await asyncio.sleep(60)
+                    continue
+                wave_start = base + 1
+                wave_end = min(base + n * chunk_size, latest)
+                _save_wave(wave_start, wave_end, job_key, source)
+                _log(f"[{job_tag}] סבב חדש: {wave_end - wave_start + 1} הודעות ({wave_start}–{wave_end}) — {chunk_size} הודעות רצופות לכל חשבון, כל אחד קופץ ישירות לחלק שלו", "info")
+
+            tasks = []
+            for i, c in enumerate(clients):
+                r_start = wave_start + i * chunk_size
+                if r_start > wave_end:
+                    continue
+                r_end = min(r_start + chunk_size - 1, wave_end)
+                limiter = _RateLimiter(25, tag=f"{job_tag} · Acc {i+1}") if use_limiter else None
+                tasks.append(self._range_worker(c, i, n, job_tag, job_key, source, target, media_type,
+                                                 protected, tmp_dir, limiter, r_start, r_end))
+            if tasks:
+                await asyncio.gather(*tasks)
+
+            if not self.running:
+                break
+
+            _save_last_id(wave_end, job_key, source)
+            _clear_wave(job_key, source)
+            _log(f"[{job_tag}] הגל הושלם — כל החשבונות סיימו את הטווחים שלהם (עד הודעה {wave_end})", "success")
 
     async def _run_ordered_job(self, job_tag, job_key, clients, source, target, media_type, protected, tmp_dir):
         """מצב 'מסודר/כרונולוגי': כמה חשבונות מכינים הודעות (קוראים/מורידים מדיה)
@@ -583,10 +781,23 @@ class BackupEngine:
             n          = len(clients)
             start_from = int(job.get("start_from_id") or 0)
             if start_from:
+                # קפיצה ישירה להודעה המוגדרת — חד-פעמית, ללא "סריקה" מההתחלה.
+                # אחרי שמשתמשים בערך פעם אחת מנקים אותו מהתצורה כדי שלא יתאפס
+                # שוב בכל הפעלה (זה היה גורם להעברה "לא להתקדם" — מתחיל מאותה
+                # נקודה בכל ריצה במקום להמשיך מההתקדמות השמורה).
                 _save_last_id(start_from, job_key, source)
                 for i in range(n):
                     _save_worker_id(start_from, job_key, source, i, n)
-                _log(f"[{job_tag}] מתחיל מהודעה {start_from}", "info")
+                _log(f"[{job_tag}] קופץ ישירות להודעה {start_from} (חד-פעמי, בלי לסרוק) — מכאן ימשיך מההתקדמות שנשמרת", "info")
+                try:
+                    full_cfg = _load_cfg()
+                    for jb in full_cfg.get("jobs", []):
+                        if (jb.get("id") or "") == job_key:
+                            jb["start_from_id"] = 0
+                    _save_cfg(full_cfg)
+                except Exception:
+                    pass
+                job["start_from_id"] = 0
 
             protected = False
             try:
@@ -612,11 +823,14 @@ class BackupEngine:
 
             if mode == "ordered" and n > 1:
                 job_tasks.append(self._run_ordered_job(job_tag, job_key, clients, source, target, media_type, protected, tmp_dir))
+            elif n > 1:
+                # מצב מהיר עם כמה חשבונות — חלוקה לטווחי-ID רציפים וקבועים מראש
+                # (כל חשבון קופץ ישירות לטווח שלו, ללא סריקה כפולה/מבוזבזת).
+                job_tasks.append(self._run_fast_job(job_tag, job_key, clients, source, target, media_type, protected, tmp_dir, use_limiter))
             else:
-                job_tasks.extend(
-                    self._worker(c, i, n, job_tag, job_key, source, target, media_type, protected, tmp_dir,
-                                 _RateLimiter(25, tag=f"{job_tag} · Acc {i+1}") if use_limiter else None)
-                    for i, c in enumerate(clients)
+                job_tasks.append(
+                    self._worker(clients[0], 0, 1, job_tag, job_key, source, target, media_type, protected, tmp_dir,
+                                 _RateLimiter(25, tag=f"{job_tag} · Acc 1") if use_limiter else None)
                 )
 
         if not job_tasks:
@@ -772,6 +986,7 @@ def create_app():
             return jsonify({"ok": False, "msg": "Invalid source chat id"})
         if source:
             _save_last_id(0, job_id, source)
+            _clear_wave(job_id, source)
             for p in glob.glob(os.path.join(DATA_DIR, f"last_id_job{job_id}_{source}_part*_*.txt")):
                 try: os.remove(p)
                 except Exception: pass
