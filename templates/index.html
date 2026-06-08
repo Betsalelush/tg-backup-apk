@@ -112,7 +112,7 @@
 
 <div class="tabs">
   <div class="tab active" onclick="switchTab(0)">חשבונות</div>
-  <div class="tab" onclick="switchTab(1)">ערוצים</div>
+  <div class="tab" onclick="switchTab(1)">משימות</div>
   <div class="tab" onclick="switchTab(2)">לוג</div>
   <div class="tab" onclick="switchTab(3)">אודות</div>
 </div>
@@ -141,41 +141,26 @@
   </div>
 </div>
 
-<!-- Channels -->
+<!-- Jobs -->
 <div class="panel" id="p1">
-  <div class="field">
-    <label>מקור — Chat ID (להעתיק ממנו)</label>
-    <input id="src" type="text" placeholder="-1001234567890">
-  </div>
-  <div class="field">
-    <label>יעד — Chat ID (להעתיק אליו)</label>
-    <input id="tgt" type="text" placeholder="-1009876543210">
-  </div>
-  <div class="field">
-    <label>סוג הודעות להעתיק</label>
-    <select id="mediaType" style="width:100%;padding:9px 10px;border-radius:5px;border:1px solid #bbb;background:#fff;color:#111;font-size:14px">
-      <option value="video_doc">וידאו + קבצים בלבד</option>
-      <option value="photo">תמונות בלבד</option>
-      <option value="all_media">כל המדיה (ללא מדבקות)</option>
-      <option value="text">טקסט בלבד</option>
-      <option value="all">הכל</option>
-    </select>
-  </div>
   <div class="info-box">
-    <strong>הועברו בסשן זה:</strong>
+    <strong>הועברו בסשן זה (כל המשימות):</strong>
     <span class="big-num" id="transferredVal">0</span>
     <span style="font-size:.85rem;color:#555;margin-right:8px">הודעות</span>
   </div>
-  <div class="info-box" style="margin-top:8px">
-    <strong>הודעה אחרונה שעובדה:</strong><br>
-    <span class="big-num" id="lastIdVal">0</span>
-    <button class="sm btn-del" style="margin-right:8px;margin-top:6px"
-      onclick="resetLastId()">Reset</button>
+
+  <p style="font-size:.8rem;color:#555;margin:6px 0 10px">
+    כל משימה מעבירה מערוץ מקור אחד לערוץ יעד אחד, עם תת-קבוצה משלה של חשבונות.
+    אפשר להריץ כמה משימות במקביל — כל אחת עם הגדרות וחשבונות נפרדים. חשבון יכול
+    להשתתף ב<strong>משימה אחת בלבד</strong> בכל פעם.
+  </p>
+
+  <div class="acc-btns">
+    <button class="sm btn-add" onclick="addJob()">＋ הוסף משימה</button>
+    <button class="sm btn-del" onclick="delJob()">✕ הסר משימה</button>
   </div>
-  <div class="field" style="margin-top:10px">
-    <label>התחל מהודעה מספר (0 = המשך מהמקום האחרון)</label>
-    <input id="startFromId" type="number" min="0" placeholder="0" value="0">
-  </div>
+  <div class="acc-tabs" id="jobTabs"></div>
+  <div id="jobPanels"></div>
 
   <!-- Chat ID guide -->
   <div style="margin-top:14px;border-top:1px solid #eee;padding-top:12px">
@@ -206,7 +191,7 @@
   </div>
 
   <!-- משוב -->
-  <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">משוב</div>
+  <div style="font-weight:700;color:#1565c0;margin-bottom:4px;font-size:.95rem">משוב ועדכונים</div>
   <p style="font-size:.85rem;color:#333;margin-bottom:8px">שאלות, הצעות, דיווח על בעיות — בקבוצת הטלגרם:</p>
   <a href="{{ tg_group }}" target="_blank"
      style="display:inline-block;background:#1565c0;color:#fff;padding:8px 16px;border-radius:5px;text-decoration:none;font-weight:700;font-size:.9rem">
@@ -237,15 +222,21 @@
 <script>
 const cfg = {{ config|tojson }};
 let accounts = cfg.accounts || [];
-let logCount = 0, activeAccIdx = 0;
+let jobs = (cfg.jobs || []).map(j => ({...j, account_indices: j.account_indices || []}));
+let logCount = 0, activeAccIdx = 0, activeJobIdx = 0;
 let authStatus = {};
 
+function genJobId() {
+  return 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+
 function init() {
-  document.getElementById('src').value = cfg.source_chat_id || '';
-  document.getElementById('tgt').value = cfg.target_chat_id || '';
-  if (cfg.media_type) document.getElementById('mediaType').value = cfg.media_type;
-  if (cfg.start_from_id) document.getElementById('startFromId').value = cfg.start_from_id;
+  if (!jobs.length) {
+    jobs.push({id: genJobId(), name: 'משימה 1', source_chat_id: '', target_chat_id: '',
+               media_type: 'video_doc', start_from_id: 0, account_indices: [], mode: 'fast'});
+  }
   buildAccUI();
+  buildJobUI();
   pollStatus();
   setInterval(pollStatus, 2500);
   connectSSE();
@@ -339,9 +330,164 @@ function addAccount() {
 
 function delAccount() {
   if (!accounts.length) return;
-  accounts.splice(activeAccIdx,1);
+  if (!confirm('להסיר את החשבון? משימות שמשייכות אותו יעודכנו בהתאם.')) return;
+  const removedIdx = activeAccIdx;
+  accounts.splice(removedIdx,1);
+  jobs.forEach(job => {
+    job.account_indices = (job.account_indices||[])
+      .filter(ai => ai !== removedIdx)
+      .map(ai => ai > removedIdx ? ai - 1 : ai);
+  });
   activeAccIdx = Math.max(0,activeAccIdx-1);
   buildAccUI();
+  buildJobUI();
+}
+
+// ── Jobs (משימות) ─────────────────────────────────────────────────────────────
+function buildJobUI() {
+  const tabs   = document.getElementById('jobTabs');
+  const panels = document.getElementById('jobPanels');
+  tabs.innerHTML = ''; panels.innerHTML = '';
+
+  if (!jobs.length) {
+    panels.innerHTML = '<p style="color:#555;padding:10px">אין משימות. לחץ ＋ הוסף משימה.</p>';
+    return;
+  }
+
+  jobs.forEach((job, i) => {
+    const t = document.createElement('div');
+    t.className = 'atab' + (i===activeJobIdx?' active':'');
+    t.textContent = job.name || `משימה ${i+1}`;
+    t.onclick = () => switchJob(i);
+    tabs.appendChild(t);
+
+    const p = document.createElement('div');
+    p.className = 'apanel' + (i===activeJobIdx?' active':'');
+    p.id = `jp${i}`;
+    p.innerHTML = `
+      <div class="field"><label>שם המשימה</label>
+        <input id="jn${i}" value="${job.name||''}" oninput="syncJobTab(${i})"></div>
+      <div class="grid2">
+        <div class="field"><label>מקור — Chat ID</label>
+          <input id="jsrc${i}" value="${job.source_chat_id||''}" placeholder="-1001234567890"></div>
+        <div class="field"><label>יעד — Chat ID</label>
+          <input id="jtgt${i}" value="${job.target_chat_id||''}" placeholder="-1009876543210"></div>
+      </div>
+      <div class="field">
+        <label>סוג הודעות להעתיק</label>
+        <select id="jmt${i}" style="width:100%;padding:9px 10px;border-radius:5px;border:1px solid #bbb;background:#fff;color:#111;font-size:14px">
+          <option value="video_doc">וידאו + קבצים בלבד</option>
+          <option value="photo">תמונות בלבד</option>
+          <option value="all_media">כל המדיה (ללא מדבקות)</option>
+          <option value="text">טקסט בלבד</option>
+          <option value="all">הכל</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>מצב עבודה (כששייכים למשימה כמה חשבונות)</label>
+        <select id="jmode${i}" style="width:100%;padding:9px 10px;border-radius:5px;border:1px solid #bbb;background:#fff;color:#111;font-size:14px">
+          <option value="fast">⚡ מהיר — כולם פועלים יחד, ייתכן סדר מבולגן ביעד</option>
+          <option value="ordered">📑 מסודר — שומר על הסדר הכרונולוגי של המקור ביעד</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>חשבונות שמשתתפים במשימה זו (חשבון אחד — למשימה אחת בלבד)</label>
+        <div id="jaccs${i}" style="border:1px solid #ddd;border-radius:6px;padding:6px 10px"></div>
+      </div>
+      <div class="info-box">
+        <strong>הודעה אחרונה שעובדה:</strong><br>
+        <span class="big-num" id="jlast${i}">0</span>
+        <button class="sm btn-del" style="margin-right:8px;margin-top:6px" onclick="resetJobLastId(${i})">Reset</button>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>התחל מהודעה מספר (0 = המשך מהמקום האחרון)</label>
+        <input id="jstart${i}" type="number" min="0" placeholder="0" value="${job.start_from_id||0}">
+      </div>`;
+    panels.appendChild(p);
+
+    const mtSel = document.getElementById(`jmt${i}`);
+    if (mtSel) mtSel.value = job.media_type || 'video_doc';
+    const modeSel = document.getElementById(`jmode${i}`);
+    if (modeSel) modeSel.value = job.mode || 'fast';
+    renderJobAccounts(i);
+  });
+}
+
+function jobClaiming(accIdx, exceptJobIdx) {
+  for (let j = 0; j < jobs.length; j++) {
+    if (j === exceptJobIdx) continue;
+    if ((jobs[j].account_indices||[]).includes(accIdx)) return j;
+  }
+  return -1;
+}
+
+function renderJobAccounts(jobIdx) {
+  const box = document.getElementById(`jaccs${jobIdx}`);
+  if (!box) return;
+  if (!accounts.length) {
+    box.innerHTML = '<p style="color:#555;font-size:.85rem;padding:4px 0">אין חשבונות מוגדרים — הוסף בלשונית "חשבונות".</p>';
+    return;
+  }
+  box.innerHTML = accounts.map((a, ai) => {
+    const claimedBy = jobClaiming(ai, jobIdx);
+    const checked   = (jobs[jobIdx].account_indices||[]).includes(ai);
+    const disabled  = claimedBy !== -1 && !checked;
+    const label     = a.client_name || `Acc ${ai+1}`;
+    const note      = disabled
+      ? ` <span style="color:#e65100;font-size:.75rem">— משויך כבר ל"${jobs[claimedBy].name||('משימה '+(claimedBy+1))}"</span>`
+      : '';
+    return `<label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-weight:400;font-size:.88rem;color:${disabled?'#aaa':'#111'}">
+      <input type="checkbox" ${checked?'checked':''} ${disabled?'disabled':''}
+        onchange="toggleJobAccount(${jobIdx},${ai},this.checked)">
+      ${label}${note}
+    </label>`;
+  }).join('');
+}
+
+function toggleJobAccount(jobIdx, accIdx, checked) {
+  const job = jobs[jobIdx];
+  job.account_indices = job.account_indices || [];
+  if (checked) {
+    if (!job.account_indices.includes(accIdx)) job.account_indices.push(accIdx);
+  } else {
+    job.account_indices = job.account_indices.filter(x => x !== accIdx);
+  }
+  jobs.forEach((_, j) => renderJobAccounts(j));
+}
+
+function syncJobTab(i) {
+  jobs[i].name = document.getElementById(`jn${i}`)?.value || `משימה ${i+1}`;
+  const tabs = document.querySelectorAll('#jobTabs .atab');
+  if (tabs[i]) tabs[i].textContent = jobs[i].name;
+  jobs.forEach((_, j) => renderJobAccounts(j));
+}
+
+function switchJob(i) {
+  activeJobIdx = i;
+  document.querySelectorAll('#jobTabs .atab').forEach((t,j)=>t.classList.toggle('active',j===i));
+  document.querySelectorAll('#jobPanels .apanel').forEach((p,j)=>p.classList.toggle('active',j===i));
+}
+
+function addJob() {
+  jobs.push({id: genJobId(), name: `משימה ${jobs.length+1}`, source_chat_id:'', target_chat_id:'',
+             media_type:'video_doc', start_from_id:0, account_indices:[], mode:'fast'});
+  activeJobIdx = jobs.length-1;
+  buildJobUI();
+}
+
+function delJob() {
+  if (!jobs.length) return;
+  if (!confirm('להסיר את המשימה?')) return;
+  jobs.splice(activeJobIdx,1);
+  activeJobIdx = Math.max(0, activeJobIdx-1);
+  buildJobUI();
+}
+
+async function resetJobLastId(i) {
+  if (!confirm('לאפס את ההתקדמות של המשימה? היא תתחיל מחדש מההתחלה.')) return;
+  await fetch('/reset_last_id',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id: jobs[i].id})});
+  const el = document.getElementById(`jlast${i}`);
+  if (el) el.textContent = '0';
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -395,6 +541,16 @@ function updateConnStatus(i, st) {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 function gatherConfig() {
+  jobs.forEach((job, i) => {
+    job.id             = job.id || genJobId();
+    job.name           = document.getElementById(`jn${i}`)?.value.trim() || `משימה ${i+1}`;
+    job.source_chat_id = document.getElementById(`jsrc${i}`)?.value.trim() || '';
+    job.target_chat_id = document.getElementById(`jtgt${i}`)?.value.trim() || '';
+    job.media_type     = document.getElementById(`jmt${i}`)?.value || 'video_doc';
+    job.mode           = document.getElementById(`jmode${i}`)?.value || 'fast';
+    job.start_from_id  = parseInt(document.getElementById(`jstart${i}`)?.value) || 0;
+    job.account_indices = job.account_indices || [];
+  });
   return {
     accounts: accounts.map((_,i)=>({
       client_name: document.getElementById(`cn${i}`)?.value.trim()||`account${i+1}`,
@@ -402,10 +558,7 @@ function gatherConfig() {
       api_id:      document.getElementById(`ai${i}`)?.value.trim()||'',
       api_hash:    document.getElementById(`ah${i}`)?.value.trim()||'',
     })),
-    source_chat_id: document.getElementById('src').value.trim(),
-    target_chat_id: document.getElementById('tgt').value.trim(),
-    media_type: document.getElementById('mediaType').value,
-    start_from_id: parseInt(document.getElementById('startFromId')?.value) || 0,
+    jobs: jobs,
   };
 }
 
@@ -432,23 +585,24 @@ async function stopBot()   { await fetch('/stop',{method:'POST'}); }
 async function pauseBot()  { await fetch('/pause',{method:'POST'}); }
 async function resumeBot() { await fetch('/resume',{method:'POST'}); }
 
-async function resetLastId() {
-  if (!confirm('לאפס Last ID? הגיבוי יתחיל מחדש מההתחלה.')) return;
-  await fetch('/reset_last_id', {method:'POST'});
-  document.getElementById('lastIdVal').textContent='0';
-}
-
 // ── Status ────────────────────────────────────────────────────────────────────
 async function pollStatus() {
   try {
-    const [s, lid, ast] = await Promise.all([
+    const [s, ast, jst] = await Promise.all([
       fetch('/status').then(r=>r.json()),
-      fetch('/last_id').then(r=>r.json()),
       fetch('/auth/status').then(r=>r.json()),
+      fetch('/jobs_status').then(r=>r.json()),
     ]);
     applyStatus(s.running, s.paused);
-    if (s.transferred !== undefined) document.getElementById('transferredVal').textContent = s.transferred;
-    if (lid.last_id) document.getElementById('lastIdVal').textContent = lid.last_id;
+    const tv = document.getElementById('transferredVal');
+    if (tv && s.transferred !== undefined) tv.textContent = s.transferred;
+    (jst||[]).forEach(js => {
+      const idx = jobs.findIndex(j => j.id === js.id);
+      if (idx >= 0) {
+        const el = document.getElementById(`jlast${idx}`);
+        if (el && js.last_id) el.textContent = js.last_id;
+      }
+    });
     let changed = false;
     for (const [name, st] of Object.entries(ast)) {
       if (authStatus[name] !== st) { authStatus[name]=st; changed=true; }

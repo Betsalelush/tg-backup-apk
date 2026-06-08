@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__fi
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
-APP_VERSION  = "1.1"
+APP_VERSION  = "1.2"
 BOT_TOKEN    = "8867679619:AAFf7O96HEbKako4rE-xg_kAHe-OICOQVFw"
 REPORT_CHAT  = "@backuppppy"   # הבוט חייב להיות חבר בקבוצה
 TG_GROUP_URL = "https://t.me/backuppppy"
@@ -57,10 +58,9 @@ def _try_register(phone):
 
 DEFAULT_CFG = {
     "accounts": [],
-    "source_chat_id": "",
-    "target_chat_id": "",
-    "media_type": "video_doc",  # video_doc | photo | all_media | text | all
-    "start_from_id": 0,
+    "jobs": [],
+    # כל job: {id, name, source_chat_id, target_chat_id, media_type,
+    #          start_from_id, account_indices: [...], mode: "fast"|"ordered"}
 }
 
 # loop קבוע אחד לכל פעולות Telethon
@@ -73,7 +73,20 @@ def _load_cfg():
         try:
             with open(CONFIG_FILE, encoding="utf-8") as f:
                 d = json.load(f)
-            out = DEFAULT_CFG.copy(); out.update(d); return out
+            out = DEFAULT_CFG.copy(); out.update(d)
+            # מיגרציה מתצורה ישנה (מקור/יעד יחיד) למשימה ראשונה ברשימת jobs
+            if not out.get("jobs") and out.get("source_chat_id") and out.get("target_chat_id"):
+                out["jobs"] = [{
+                    "id": "migrated",
+                    "name": "משימה 1",
+                    "source_chat_id": out.get("source_chat_id", ""),
+                    "target_chat_id": out.get("target_chat_id", ""),
+                    "media_type": out.get("media_type", "video_doc"),
+                    "start_from_id": out.get("start_from_id", 0),
+                    "account_indices": list(range(len(out.get("accounts", [])))),
+                    "mode": "fast",
+                }]
+            return out
         except Exception: pass
     return DEFAULT_CFG.copy()
 
@@ -82,16 +95,43 @@ def _save_cfg(cfg):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
-def _last_id_path(source_id):
-    return os.path.join(DATA_DIR, f"last_id_{source_id}.txt")
+def _last_id_path(job_key, source_id):
+    return os.path.join(DATA_DIR, f"last_id_job{job_key}_{source_id}.txt")
 
-def _save_last_id(mid, source_id):
-    with open(_last_id_path(source_id), "w") as f: f.write(str(mid))
+def _save_last_id(mid, job_key, source_id):
+    with open(_last_id_path(job_key, source_id), "w") as f: f.write(str(mid))
 
-def _load_last_id(source_id):
+def _load_last_id(job_key, source_id):
     try:
-        with open(_last_id_path(source_id)) as f: return int(f.read().strip())
+        with open(_last_id_path(job_key, source_id)) as f: return int(f.read().strip())
     except Exception: return 0
+
+def _worker_id_path(job_key, source_id, idx, total):
+    return os.path.join(DATA_DIR, f"last_id_job{job_key}_{source_id}_part{total}_{idx}.txt")
+
+def _save_worker_id(mid, job_key, source_id, idx, total):
+    with open(_worker_id_path(job_key, source_id, idx, total), "w") as f: f.write(str(mid))
+
+def _load_worker_id(job_key, source_id, idx, total):
+    try:
+        with open(_worker_id_path(job_key, source_id, idx, total)) as f: return int(f.read().strip())
+    except Exception:
+        return _load_last_id(job_key, source_id)
+
+def _job_progress(job, total_accounts):
+    """ערך 'התקדמות' תצוגתי למשימה — לפי המצב שלה ומספר החשבונות שמוקצים לה."""
+    job_key = job.get("id") or ""
+    try:
+        source = int(job.get("source_chat_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+    mode = job.get("mode", "fast")
+    n = max(total_accounts, 1)
+    if mode == "ordered" and total_accounts > 1:
+        return _load_last_id(job_key, source)
+    if total_accounts <= 1:
+        return _load_worker_id(job_key, source, 0, 1)
+    return max((_load_worker_id(job_key, source, i, n) for i in range(n)), default=0)
 
 def _log(msg, level="info"):
     entry = {"time": datetime.now().strftime("%H:%M:%S"), "level": level, "msg": msg}
@@ -183,6 +223,36 @@ async def _auth_disconnect(acc):
     return {"ok": True}
 
 
+class _RateLimiter:
+    """תקרת קצב נוספת — *בנוסף* לכל ההגבלות/השהיות הקיימות, לא במקומן.
+    מופע נפרד נוצר לכל חשבון בנפרד (לא משותף בין חשבונות!) — כך שכל חשבון
+    מוגבל ל-25 הודעות/דקה משלו, גם כשכמה חשבונות עובדים על אותה משימה.
+    סופרת הודעות בחלון נע של 60 שניות, וכשמגיעים לתקרה ממתינה עד שהחלון
+    מתאפס. מופעלת רק כשחשבון יחיד מעביר או כשכמה חשבונות עובדים במצב
+    'מהיר/מבולגן' (ראו היצירה של _RateLimiter ב-run)."""
+    def __init__(self, max_per_minute, tag=""):
+        self.max = max_per_minute
+        self.tag = tag
+        self.count = 0
+        self.window_start = datetime.now()
+        self.lock = asyncio.Lock()
+
+    async def acquire(self):
+        while True:
+            async with self.lock:
+                elapsed = (datetime.now() - self.window_start).total_seconds()
+                if elapsed >= 60:
+                    self.count = 0
+                    self.window_start = datetime.now()
+                    elapsed = 0
+                if self.count < self.max:
+                    self.count += 1
+                    return
+                wait = max(60 - elapsed, 0.5)
+            _log(f"[{self.tag}] תקרת {self.max} הודעות/דקה הושגה — ממתין {int(wait)} שנ' (בנוסף להגבלות הרגילות)", "warn")
+            await asyncio.sleep(wait)
+
+
 # ── Backup engine ─────────────────────────────────────────────────────────────
 
 class BackupEngine:
@@ -207,39 +277,252 @@ class BackupEngine:
         while self._paused and self.running:
             await asyncio.sleep(0.3)
 
-    async def _send_downloaded(self, client, target, msg, caption, tmp_dir):
-        """מוריד את המדיה פיזית למכשיר ומעלה אותה כקובץ חדש — עוקף 'protected chat'"""
-        os.makedirs(tmp_dir, exist_ok=True)
-        path = await client.download_media(msg.media, file=tmp_dir + os.sep)
+    async def _send_downloaded(self, client, target, msg, caption, tmp_dir, tag):
+        """מוריד את המדיה פיזית למכשיר ומעלה אותה כקובץ חדש — עוקף 'protected chat'.
+        כל הודעה מקבלת תת-תיקייה ייחודית (לפי חשבון+מזהה הודעה) כדי שעבודה
+        מקבילה של כמה חשבונות לא תתנגש על אותו שם קובץ זמני."""
+        work_dir = os.path.join(tmp_dir, f"{tag}_{msg.id}")
+        os.makedirs(work_dir, exist_ok=True)
+        path = None
         try:
+            path = await client.download_media(msg.media, file=work_dir + os.sep)
             if path:
                 await client.send_message(target, caption, file=path)
             else:
                 await client.send_message(target, caption)
         finally:
-            if path and os.path.exists(path):
-                try: os.remove(path)
-                except Exception: pass
+            try:
+                if path and os.path.exists(path): os.remove(path)
+                os.rmdir(work_dir)
+            except Exception:
+                pass
+
+    async def _worker(self, client, idx, total, job_tag, job_key, source, target, media_type, protected, tmp_dir, limiter):
+        """לולאת עבודה של חשבון אחד בתוך משימה — מטפל רק בהודעות עם msg.id % total == idx,
+        כך שהמשימה מתחלקת בין כל החשבונות שהוקצו לה והם פועלים בו-זמנית (asyncio.gather ב-run).
+        זהו מצב 'מהיר/מבולגן' (גם עבור חשבון בודד, כש-total==1).
+        במצב מוגן (הורדה+העלאה) לא מחילים את עיכובי ההאטה הרגילים — הם נועדו לערוצים
+        רגילים בלבד; בערוץ מוגן ההורדה/העלאה כבר איטית מספיק מצד עצמה.
+        limiter — תקרת קצב נוספת (25/דקה) ייעודית *לחשבון הזה בלבד* (לא משותפת
+        בין חשבונות); מופעלת רק עבור חשבון יחיד או מצב מהיר, ראו run().
+        מצטרפת *מעבר* לעיכובים הרגילים, לא במקומם."""
+        from telethon import errors
+        tag = f"{job_tag} · Acc {idx+1}"
+        while self.running:
+            await self._wait_if_paused()
+            if not self.running: break
+            last_id = _load_worker_id(job_key, source, idx, total)
+            try:
+                last_proc = last_id
+                async for msg in client.iter_messages(source, offset_id=last_id, reverse=True, limit=50):
+                    if not self.running: break
+                    await self._wait_if_paused()
+                    if not self.running: break
+                    if msg.id > last_proc: last_proc = msg.id
+
+                    if total > 1 and msg.id % total != idx:
+                        continue
+
+                    if _msg_matches(msg, media_type):
+                        try:
+                            caption = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+|@\S+", "", msg.text or "").strip()
+                            if limiter:
+                                await limiter.acquire()
+                            if not msg.media:
+                                await client.send_message(target, caption)
+                            elif protected:
+                                await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
+                            else:
+                                try:
+                                    await client.send_message(target, caption, file=msg.media)
+                                except Exception as exc:
+                                    if "protected chat" in str(exc).lower():
+                                        protected = True
+                                        _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה, ללא הגבלות שניות (תקרת הקצב הנוספת אם פעילה — נשארת)", "warn")
+                                        await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
+                                    else:
+                                        raise
+                            STATUS["transferred"] += 1
+                            _log(f"[{tag}] Copied msg {msg.id} — סה\"כ: {STATUS['transferred']}", "success")
+                            if not protected:
+                                await asyncio.sleep(random.uniform(1.4, 3.8))
+                        except errors.FloodWaitError as exc:
+                            _log(f"[{tag}] FloodWait {exc.seconds}s", "warn")
+                            _save_worker_id(last_proc, job_key, source, idx, total)
+                            await asyncio.sleep(exc.seconds + 1)
+                        except Exception as exc:
+                            _log(f"[{tag}] Error msg {msg.id}: {exc}", "error")
+                    else:
+                        _log(f"[{tag}] Skip {msg.id}", "warn")
+
+                if last_proc > last_id:
+                    _save_worker_id(last_proc, job_key, source, idx, total)
+                if not protected:
+                    await asyncio.sleep(random.uniform(2, 6))
+            except Exception as exc:
+                _log(f"[{tag}] Error: {exc}", "error")
+                threading.Thread(target=_bot_send, args=(f"⚠️ TG Backup error ({tag}):\n{exc}",), daemon=True).start()
+                await asyncio.sleep(30)
+
+    async def _run_ordered_job(self, job_tag, job_key, clients, source, target, media_type, protected, tmp_dir):
+        """מצב 'מסודר/כרונולוגי': כמה חשבונות מכינים הודעות (קוראים/מורידים מדיה)
+        במקביל — אבל השליחה בפועל ליעד מתבצעת אחת-אחת, לפי הסדר הכרונולוגי
+        של ערוץ המקור, כך שאין 'בלאגן' ביעד. תפקידים:
+          • סורק (clients[0]) — עובר על ההודעות לפי הסדר וממיין אותן ל-seq עולה
+          • מכינים (כל clients) — מורידים מדיה/מכינים caption במקביל
+          • שולח יחיד (clients[0]) — שולח ליעד לפי expected seq, אחת בכל פעם
+        אין כאן תקרת 25/דקה נוספת (זו מיועדת רק לחשבון יחיד / מצב מהיר-מבולגן —
+        ראו run); שאר ההגבלות (עיכוב 1.4-3.8 שנ' בערוץ לא-מוגן) כן חלות."""
+        from telethon import errors
+        n = len(clients)
+        scanner = clients[0]
+        sender = clients[0]
+        last_id = _load_last_id(job_key, source)
+
+        queue = asyncio.Queue(maxsize=n * 3)
+        ready = {}
+        cond = asyncio.Condition()
+        state = {"discovered_total": None}
+        expected = 0
+
+        async def discover():
+            seq = 0
+            try:
+                async for msg in scanner.iter_messages(source, offset_id=last_id, reverse=True):
+                    if not self.running: break
+                    await self._wait_if_paused()
+                    if not self.running: break
+                    if _msg_matches(msg, media_type):
+                        await queue.put((seq, msg))
+                        seq += 1
+                    else:
+                        _log(f"[{job_tag} · סריקה] Skip {msg.id}", "warn")
+            except Exception as exc:
+                _log(f"[{job_tag} · סריקה] Error: {exc}", "error")
+            finally:
+                state["discovered_total"] = seq
+                async with cond:
+                    cond.notify_all()
+                for _ in range(n):
+                    await queue.put(None)
+
+        async def prepare(client, idx):
+            tag = f"{job_tag} · Acc {idx+1}"
+            while True:
+                item = await queue.get()
+                if item is None:
+                    queue.task_done()
+                    break
+                seq, msg = item
+                await self._wait_if_paused()
+                caption = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+|@\S+", "", msg.text or "").strip()
+                payload = None
+                try:
+                    if msg.media and protected:
+                        work_dir = os.path.join(tmp_dir, f"{tag}_{msg.id}")
+                        os.makedirs(work_dir, exist_ok=True)
+                        path = await client.download_media(msg.media, file=work_dir + os.sep)
+                        payload = {"kind": "downloaded", "path": path, "work_dir": work_dir,
+                                   "caption": caption, "msg_id": msg.id}
+                    elif msg.media:
+                        payload = {"kind": "media_ref", "media": msg.media,
+                                   "caption": caption, "msg_id": msg.id}
+                    else:
+                        payload = {"kind": "text", "caption": caption, "msg_id": msg.id}
+                except Exception as exc:
+                    _log(f"[{tag}] שגיאה בהכנת הודעה {msg.id}: {exc}", "error")
+                    payload = {"kind": "error", "err": str(exc), "msg_id": msg.id}
+                async with cond:
+                    ready[seq] = payload
+                    cond.notify_all()
+                queue.task_done()
+
+        async def deliver():
+            nonlocal expected
+            tag = f"{job_tag} · Acc 1"
+            while self.running:
+                async with cond:
+                    while (self.running and expected not in ready
+                           and not (state["discovered_total"] is not None and expected >= state["discovered_total"])):
+                        try:
+                            await asyncio.wait_for(cond.wait(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            pass
+                    if not self.running:
+                        return
+                    if expected not in ready:
+                        return  # נסרקו כל ההודעות התואמות ונשלחו
+                    payload = ready.pop(expected)
+
+                await self._wait_if_paused()
+                if not self.running: return
+                kind = payload["kind"]
+                msg_id = payload["msg_id"]
+                try:
+                    if kind == "downloaded":
+                        if payload["path"]:
+                            await sender.send_message(target, payload["caption"], file=payload["path"])
+                        else:
+                            await sender.send_message(target, payload["caption"])
+                    elif kind == "media_ref":
+                        try:
+                            await sender.send_message(target, payload["caption"], file=payload["media"])
+                        except Exception as exc:
+                            _log(f"[{tag}] Error msg {msg_id}: {exc}", "error")
+                            expected += 1
+                            continue
+                    elif kind == "text":
+                        await sender.send_message(target, payload["caption"])
+                    elif kind == "error":
+                        _log(f"[{tag}] מדלג על הודעה {msg_id} (נכשלה ההכנה: {payload['err']})", "error")
+                        expected += 1
+                        continue
+
+                    STATUS["transferred"] += 1
+                    _log(f"[{tag}] Copied msg {msg_id} — סה\"כ: {STATUS['transferred']}", "success")
+                    _save_last_id(msg_id, job_key, source)
+                    if not protected:
+                        await asyncio.sleep(random.uniform(1.4, 3.8))
+                except errors.FloodWaitError as exc:
+                    _log(f"[{tag}] FloodWait {exc.seconds}s", "warn")
+                    async with cond:
+                        ready[expected] = payload
+                        cond.notify_all()
+                    await asyncio.sleep(exc.seconds + 1)
+                    continue
+                except Exception as exc:
+                    _log(f"[{tag}] Error msg {msg_id}: {exc}", "error")
+                finally:
+                    if kind == "downloaded":
+                        try:
+                            p, wd = payload.get("path"), payload.get("work_dir")
+                            if p and os.path.exists(p): os.remove(p)
+                            if wd: os.rmdir(wd)
+                        except Exception:
+                            pass
+                expected += 1
+
+        await asyncio.gather(discover(), *[prepare(c, i) for i, c in enumerate(clients)], deliver())
 
     async def run(self):
-        from telethon import TelegramClient, errors
+        from telethon import TelegramClient
         self.running = True
-        source     = int(self.config["source_chat_id"])
-        target     = int(self.config["target_chat_id"])
-        media_type = self.config.get("media_type", "video_doc")
-        start_from = int(self.config.get("start_from_id") or 0)
-        if start_from:
-            _save_last_id(start_from, source)
-            _log(f"Starting from message ID {start_from}", "info")
         STATUS["transferred"] = 0
+        accounts_cfg = self.config.get("accounts", [])
+        jobs = self.config.get("jobs", [])
 
-        clients = []
-        for acc in self.config.get("accounts", []):
+        if not jobs:
+            _log("לא הוגדרו משימות — אין מה להפעיל.", "error")
+            self.running = False; STATUS["running"] = False; return
+
+        # מתחברים פעם אחת לכל החשבונות המוגדרים — כל משימה תקבל את תת-הקבוצה שלה
+        name_to_client = {}
+        for acc in accounts_cfg:
             name = acc.get("client_name", "")
             if not acc.get("api_id") or not acc.get("api_hash"): continue
             state = AUTH_STATE.get(name)
             if state and state["status"] == "connected" and state.get("client"):
-                clients.append(state["client"])
+                name_to_client[name] = state["client"]
                 _log(f"{name} reusing session", "success")
             else:
                 session_path = os.path.join(DATA_DIR, name)
@@ -247,7 +530,7 @@ class BackupEngine:
                     c = TelegramClient(session_path, int(acc["api_id"]), acc["api_hash"])
                     await c.connect()
                     if await c.is_user_authorized():
-                        clients.append(c)
+                        name_to_client[name] = c
                         AUTH_STATE[name] = {"client": c, "status": "connected"}
                         _log(f"{name} connected", "success")
                     else:
@@ -255,80 +538,98 @@ class BackupEngine:
                 except Exception as exc:
                     _log(f"Failed {name}: {exc}", "error")
 
-        if not clients:
+        if not name_to_client:
             _log("No authorized accounts — aborting.", "error")
             self.running = False; STATUS["running"] = False; return
 
-        protected = False
         tmp_dir = os.path.join(DATA_DIR, "tmp_media")
-        try:
-            src_ent = await clients[0].get_entity(source)
-            protected = bool(getattr(src_ent, "noforwards", False))
-            if protected:
-                os.makedirs(tmp_dir, exist_ok=True)
-                _log("ערוץ מקור מוגן (Protected Content) — מצב הורדה+העלאה פעיל", "warn")
-        except Exception:
-            pass
+        job_tasks = []
+        used_indices = set()  # אכיפת "חשבון אחד למשימה אחת בלבד"
 
-        _log(f"Active [{media_type}] — {source} → {target}", "info")
-        idx = 0
-
-        while self.running:
-            await self._wait_if_paused()
-            if not self.running: break
-            client = clients[idx]
-            last_id = _load_last_id(source)
+        for j_idx, job in enumerate(jobs):
+            job_tag = job.get("name") or f"משימה {j_idx+1}"
+            job_key = job.get("id") or f"job{j_idx}"
             try:
-                batch = 0; last_proc = last_id
-                max_batch = random.randint(2, 6)
-                async for msg in client.iter_messages(source, offset_id=last_id, reverse=True, limit=50):
-                    if not self.running: break
-                    await self._wait_if_paused()
-                    if not self.running: break
-                    if msg.id > last_proc: last_proc = msg.id
+                source = int(job.get("source_chat_id") or 0)
+                target = int(job.get("target_chat_id") or 0)
+            except (TypeError, ValueError):
+                _log(f"[{job_tag}] Chat ID לא תקין — מדלג על המשימה", "error")
+                continue
+            if not source or not target:
+                _log(f"[{job_tag}] חסרים Chat ID — מדלג על המשימה", "error")
+                continue
 
-                    if _msg_matches(msg, media_type):
-                        try:
-                            caption = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+|@\S+", "", msg.text or "").strip()
-                            if not msg.media:
-                                await client.send_message(target, caption)
-                            elif protected:
-                                await self._send_downloaded(client, target, msg, caption, tmp_dir)
-                            else:
-                                try:
-                                    await client.send_message(target, caption, file=msg.media)
-                                except Exception as exc:
-                                    if "protected chat" in str(exc).lower():
-                                        protected = True
-                                        _log("זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
-                                        await self._send_downloaded(client, target, msg, caption, tmp_dir)
-                                    else:
-                                        raise
-                            STATUS["transferred"] += 1
-                            _log(f"[Acc {idx+1}] Copied msg {msg.id} — סה\"כ: {STATUS['transferred']}", "success")
-                            batch += 1
-                            await asyncio.sleep(random.uniform(1.4, 3.8))
-                            if batch >= max_batch:
-                                _save_last_id(last_proc, source); break
-                        except errors.FloodWaitError as exc:
-                            _log(f"FloodWait {exc.seconds}s — switching account", "warn")
-                            _save_last_id(last_proc, source); await asyncio.sleep(2.8); break
-                        except Exception as exc:
-                            _log(f"Error msg {msg.id}: {exc}", "error")
-                    else:
-                        _log(f"[Acc {idx+1}] Skip {msg.id}", "warn")
+            clients = []
+            for ai in (job.get("account_indices") or []):
+                if not isinstance(ai, int) or ai < 0 or ai >= len(accounts_cfg):
+                    continue
+                if ai in used_indices:
+                    _log(f"[{job_tag}] חשבון #{ai+1} כבר משויך למשימה אחרת — מדלג עליו (חשבון אחד יכול להשתתף במשימה אחת בלבד)", "warn")
+                    continue
+                name = accounts_cfg[ai].get("client_name", "")
+                client = name_to_client.get(name)
+                if not client:
+                    _log(f"[{job_tag}] חשבון #{ai+1} ({name}) לא מחובר — מדלג עליו", "warn")
+                    continue
+                used_indices.add(ai)
+                clients.append(client)
 
-                if last_proc > last_id:
-                    _save_last_id(last_proc, source)
-                idx = (idx + 1) % len(clients)
-                _log(f"Switching to account {idx+1}", "info")
-                await asyncio.sleep(random.uniform(2, 6))
-            except Exception as exc:
-                _log(f"Error: {exc}", "error")
-                threading.Thread(target=_bot_send, args=(f"⚠️ TG Backup error:\n{exc}",), daemon=True).start()
-                await asyncio.sleep(30)
+            if not clients:
+                _log(f"[{job_tag}] אין חשבונות מחוברים וזמינים למשימה — מדלגים עליה", "error")
+                continue
 
-        for c in clients:
+            media_type = job.get("media_type", "video_doc")
+            mode       = job.get("mode", "fast")
+            n          = len(clients)
+            start_from = int(job.get("start_from_id") or 0)
+            if start_from:
+                _save_last_id(start_from, job_key, source)
+                for i in range(n):
+                    _save_worker_id(start_from, job_key, source, i, n)
+                _log(f"[{job_tag}] מתחיל מהודעה {start_from}", "info")
+
+            protected = False
+            try:
+                src_ent = await clients[0].get_entity(source)
+                protected = bool(getattr(src_ent, "noforwards", False))
+                if protected:
+                    os.makedirs(tmp_dir, exist_ok=True)
+                    _log(f"[{job_tag}] ערוץ מקור מוגן (Protected Content) — מצב הורדה+העלאה פעיל, ללא הגבלות שניות", "warn")
+            except Exception:
+                pass
+
+            # תקרת 25 הודעות/דקה נוספת — רק כשחשבון יחיד מעביר, או כשכמה
+            # חשבונות עובדים במצב 'מהיר/מבולגן'. התקרה היא *לכל חשבון בנפרד*
+            # (כל חשבון עד 25/דקה משלו — לא תקרה משותפת לכלל המשימה).
+            # במצב 'מסודר' עם כמה חשבונות — אין תקרה נוספת (השליחה ממילא טורית
+            # ומסודרת). שאר ההגבלות נשארות בכל מצב.
+            use_limiter = (n == 1 or mode == "fast")
+            if use_limiter:
+                _log(f"[{job_tag}] תקרת קצב נוספת פעילה: עד 25 הודעות לדקה לכל חשבון בנפרד (בנוסף לשאר ההגבלות)", "info")
+
+            mode_label = "⚡ מהיר/מבולגן" if (mode == "fast" or n == 1) else "📑 מסודר/כרונולוגי"
+            _log(f"[{job_tag}] Active [{media_type}] — {source} → {target} | {n} חשבונות | מצב: {mode_label}", "info")
+
+            if mode == "ordered" and n > 1:
+                job_tasks.append(self._run_ordered_job(job_tag, job_key, clients, source, target, media_type, protected, tmp_dir))
+            else:
+                job_tasks.extend(
+                    self._worker(c, i, n, job_tag, job_key, source, target, media_type, protected, tmp_dir,
+                                 _RateLimiter(25, tag=f"{job_tag} · Acc {i+1}") if use_limiter else None)
+                    for i, c in enumerate(clients)
+                )
+
+        if not job_tasks:
+            _log("אין משימות פעילות לביצוע (כולן דולגו).", "error")
+            self.running = False; STATUS["running"] = False
+            for c in name_to_client.values():
+                try: await c.disconnect()
+                except Exception: pass
+            return
+
+        await asyncio.gather(*job_tasks)
+
+        for c in name_to_client.values():
             try: await c.disconnect()
             except Exception: pass
         _log("Stopped.", "info")
@@ -414,8 +715,18 @@ def create_app():
     def start():
         if STATUS["running"]: return jsonify({"ok": False, "msg": "Already running"})
         cfg = _load_cfg()
-        if not cfg["source_chat_id"] or not cfg["target_chat_id"]:
-            return jsonify({"ok": False, "msg": "Missing chat IDs"})
+        jobs = cfg.get("jobs", [])
+        if not jobs:
+            return jsonify({"ok": False, "msg": "לא הוגדרו משימות — הוסף משימה בלשונית 'משימות'"})
+        seen = set()
+        for j in jobs:
+            name = j.get("name") or "משימה"
+            if not j.get("source_chat_id") or not j.get("target_chat_id"):
+                return jsonify({"ok": False, "msg": f"במשימה '{name}' חסרים Chat ID של מקור/יעד"})
+            for ai in (j.get("account_indices") or []):
+                if ai in seen:
+                    return jsonify({"ok": False, "msg": f"חשבון אחד לא יכול להיות משויך ליותר ממשימה אחת (זוהה במשימה '{name}')"})
+                seen.add(ai)
         STATUS["running"] = True; STATUS["paused"] = False
         _log("Starting…", "info"); _start_worker(cfg)
         return jsonify({"ok": True})
@@ -438,15 +749,32 @@ def create_app():
     @app.route("/status")
     def status(): return jsonify({"running": STATUS["running"], "paused": STATUS["paused"], "transferred": STATUS["transferred"]})
 
-    @app.route("/last_id")
-    def last_id():
-        src = _load_cfg().get("source_chat_id", "")
-        return jsonify({"last_id": _load_last_id(src) if src else 0})
+    @app.route("/jobs_status")
+    def jobs_status():
+        cfg = _load_cfg()
+        out = []
+        for job in cfg.get("jobs", []):
+            n = len(job.get("account_indices") or [])
+            out.append({"id": job.get("id", ""), "last_id": _job_progress(job, n)})
+        return jsonify(out)
 
     @app.route("/reset_last_id", methods=["POST"])
     def reset_last_id():
-        src = _load_cfg().get("source_chat_id", "")
-        if src: _save_last_id(0, src)
+        data = request.json or {}
+        job_id = data.get("job_id", "")
+        cfg = _load_cfg()
+        job = next((j for j in cfg.get("jobs", []) if j.get("id") == job_id), None)
+        if not job:
+            return jsonify({"ok": False, "msg": "Job not found"})
+        try:
+            source = int(job.get("source_chat_id") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "msg": "Invalid source chat id"})
+        if source:
+            _save_last_id(0, job_id, source)
+            for p in glob.glob(os.path.join(DATA_DIR, f"last_id_job{job_id}_{source}_part*_*.txt")):
+                try: os.remove(p)
+                except Exception: pass
         return jsonify({"ok": True})
 
     @app.route("/logs")
