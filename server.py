@@ -207,6 +207,20 @@ class BackupEngine:
         while self._paused and self.running:
             await asyncio.sleep(0.3)
 
+    async def _send_downloaded(self, client, target, msg, caption, tmp_dir):
+        """מוריד את המדיה פיזית למכשיר ומעלה אותה כקובץ חדש — עוקף 'protected chat'"""
+        os.makedirs(tmp_dir, exist_ok=True)
+        path = await client.download_media(msg.media, file=tmp_dir + os.sep)
+        try:
+            if path:
+                await client.send_message(target, caption, file=path)
+            else:
+                await client.send_message(target, caption)
+        finally:
+            if path and os.path.exists(path):
+                try: os.remove(path)
+                except Exception: pass
+
     async def run(self):
         from telethon import TelegramClient, errors
         self.running = True
@@ -245,6 +259,17 @@ class BackupEngine:
             _log("No authorized accounts — aborting.", "error")
             self.running = False; STATUS["running"] = False; return
 
+        protected = False
+        tmp_dir = os.path.join(DATA_DIR, "tmp_media")
+        try:
+            src_ent = await clients[0].get_entity(source)
+            protected = bool(getattr(src_ent, "noforwards", False))
+            if protected:
+                os.makedirs(tmp_dir, exist_ok=True)
+                _log("ערוץ מקור מוגן (Protected Content) — מצב הורדה+העלאה פעיל", "warn")
+        except Exception:
+            pass
+
         _log(f"Active [{media_type}] — {source} → {target}", "info")
         idx = 0
 
@@ -265,10 +290,20 @@ class BackupEngine:
                     if _msg_matches(msg, media_type):
                         try:
                             caption = re.sub(r"https?://\S+|www\.\S+|t\.me/\S+|@\S+", "", msg.text or "").strip()
-                            if msg.media:
-                                await client.send_message(target, caption, file=msg.media)
-                            else:
+                            if not msg.media:
                                 await client.send_message(target, caption)
+                            elif protected:
+                                await self._send_downloaded(client, target, msg, caption, tmp_dir)
+                            else:
+                                try:
+                                    await client.send_message(target, caption, file=msg.media)
+                                except Exception as exc:
+                                    if "protected chat" in str(exc).lower():
+                                        protected = True
+                                        _log("זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
+                                        await self._send_downloaded(client, target, msg, caption, tmp_dir)
+                                    else:
+                                        raise
                             STATUS["transferred"] += 1
                             _log(f"[Acc {idx+1}] Copied msg {msg.id} — סה\"כ: {STATUS['transferred']}", "success")
                             batch += 1
