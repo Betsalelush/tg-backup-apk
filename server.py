@@ -21,12 +21,17 @@ DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__fi
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
-APP_VERSION  = "1.3"
+APP_VERSION  = "1.4"
 TG_GROUP_URL = "https://t.me/backuppppy"
 GITHUB_URL   = "https://github.com/backuppppy/tg-backup-apk"
 
 LOG_Q  = queue.Queue(maxsize=500)
-STATUS = {"running": False, "paused": False, "engine": None, "thread": None, "transferred": 0}
+
+# JOB_STATES: {job_id: {"running": bool, "paused": bool, "engine": BackupEngine}}
+JOB_STATES: dict = {}
+
+# Global summary status (kept for header dot / compat)
+STATUS = {"running": False, "paused": False, "transferred": 0}
 AUTH_STATE = {}
 
 
@@ -40,6 +45,14 @@ DEFAULT_CFG = {
 # loop קבוע אחד לכל פעולות Telethon
 _TG_LOOP = asyncio.new_event_loop()
 threading.Thread(target=_TG_LOOP.run_forever, daemon=True).start()
+
+
+def _update_global_status():
+    running_states = [s for s in JOB_STATES.values() if s.get("running")]
+    any_running  = bool(running_states)
+    all_paused   = bool(running_states) and all(s.get("paused") for s in running_states)
+    STATUS["running"] = any_running
+    STATUS["paused"]  = all_paused
 
 
 def _migrate_to_jobs(cfg):
@@ -96,7 +109,6 @@ def _load_cfg():
             with open(CONFIG_FILE, encoding="utf-8") as f:
                 d = json.load(f)
             out = DEFAULT_CFG.copy(); out.update(d)
-            # מיגרציה מתצורה ישנה (מקור/יעד יחיד) למשימה ראשונה ברשימת jobs
             if not out.get("jobs") and out.get("source_chat_id") and out.get("target_chat_id"):
                 out = _migrate_to_jobs(out)
             return out
@@ -135,9 +147,6 @@ def _wave_path(job_key, source_id):
     return os.path.join(DATA_DIR, f"wave_job{job_key}_{source_id}.txt")
 
 def _save_wave(start, end, job_key, source_id):
-    """שומר את גבולות ה'גל' הנוכחי (טווח ID רציף שמתחלק בין החשבונות במצב מהיר),
-    כדי שאם האפליקציה נסגרת באמצע גל — הגל יתחדש מאותם גבולות בדיוק (ולא יחושב
-    מחדש לפי 'הודעה אחרונה' עדכנית, שעלולה לשנות את חלוקת הטווחים בין החשבונות)."""
     with open(_wave_path(job_key, source_id), "w") as f: f.write(f"{start},{end}")
 
 def _load_wave(job_key, source_id):
@@ -153,7 +162,6 @@ def _clear_wave(job_key, source_id):
     except Exception: pass
 
 def _job_progress(job, total_accounts):
-    """ערך 'התקדמות' תצוגתי למשימה — לפי המצב שלה ומספר החשבונות שמוקצים לה."""
     job_key = job.get("id") or ""
     try:
         source = int(job.get("source_chat_id") or 0)
@@ -258,12 +266,6 @@ async def _auth_disconnect(acc):
 
 
 class _RateLimiter:
-    """תקרת קצב נוספת — *בנוסף* לכל ההגבלות/השהיות הקיימות, לא במקומן.
-    מופע נפרד נוצר לכל חשבון בנפרד (לא משותף בין חשבונות!) — כך שכל חשבון
-    מוגבל ל-25 הודעות/דקה משלו, גם כשכמה חשבונות עובדים על אותה משימה.
-    סופרת הודעות בחלון נע של 60 שניות, וכשמגיעים לתקרה ממתינה עד שהחלון
-    מתאפס. מופעלת רק כשחשבון יחיד מעביר או כשכמה חשבונות עובדים במצב
-    'מהיר/מבולגן' (ראו היצירה של _RateLimiter ב-run)."""
     def __init__(self, max_per_minute, tag=""):
         self.max = max_per_minute
         self.tag = tag
@@ -283,25 +285,32 @@ class _RateLimiter:
                     self.count += 1
                     return
                 wait = max(60 - elapsed, 0.5)
-            _log(f"[{self.tag}] תקרת {self.max} הודעות/דקה הושגה — ממתין {int(wait)} שנ' (בנוסף להגבלות הרגילות)", "warn")
+            _log(f"[{self.tag}] תקרת {self.max} הודעות/דקה הושגה — ממתין {int(wait)} שנ'", "warn")
             await asyncio.sleep(wait)
 
 
-# ── Backup engine ─────────────────────────────────────────────────────────────
+# ── Backup engine — per-job ───────────────────────────────────────────────────
 
 class BackupEngine:
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, job_id, config):
+        self.job_id  = job_id
+        self.config  = config
         self.running = False
-        self._paused  = False   # simple flag — safe to read/write across threads (CPython GIL)
+        self._paused = False
 
     def pause(self):
         self._paused = True
-        _log("Paused.", "warn")
+        if self.job_id in JOB_STATES:
+            JOB_STATES[self.job_id]["paused"] = True
+        _update_global_status()
+        _log(f"[{self.job_id}] Paused.", "warn")
 
     def resume(self):
         self._paused = False
-        _log("Resumed.", "success")
+        if self.job_id in JOB_STATES:
+            JOB_STATES[self.job_id]["paused"] = False
+        _update_global_status()
+        _log(f"[{self.job_id}] Resumed.", "success")
 
     def stop(self):
         self.running = False
@@ -312,9 +321,6 @@ class BackupEngine:
             await asyncio.sleep(0.3)
 
     async def _send_downloaded(self, client, target, msg, caption, tmp_dir, tag):
-        """מוריד את המדיה פיזית למכשיר ומעלה אותה כקובץ חדש — עוקף 'protected chat'.
-        כל הודעה מקבלת תת-תיקייה ייחודית (לפי חשבון+מזהה הודעה) כדי שעבודה
-        מקבילה של כמה חשבונות לא תתנגש על אותו שם קובץ זמני."""
         work_dir = os.path.join(tmp_dir, f"{tag}_{msg.id}")
         os.makedirs(work_dir, exist_ok=True)
         path = None
@@ -332,14 +338,6 @@ class BackupEngine:
                 pass
 
     async def _worker(self, client, idx, total, job_tag, job_key, source, target, media_type, protected, tmp_dir, limiter):
-        """לולאת עבודה רציפה לחשבון יחיד שאחראי על *כל* ערוץ המקור (total תמיד 1 כאן —
-        עבור משימות עם כמה חשבונות במצב מהיר משתמשים ב-_run_fast_job/_range_worker
-        שמחלקים טווחי-ID רציפים, ובמצב מסודר ב-_run_ordered_job).
-        ממשיך מ-offset_id=last_id קדימה ברצף, בלי שום 'סריקה' מההתחלה.
-        במצב מוגן (הורדה+העלאה) לא מחילים את עיכובי ההאטה הרגילים — הם נועדו לערוצים
-        רגילים בלבד; בערוץ מוגן ההורדה/העלאה כבר איטית מספיק מצד עצמה.
-        limiter — תקרת קצב נוספת (25/דקה) ייעודית *לחשבון הזה בלבד*; מצטרפת
-        *מעבר* לעיכובים הרגילים, לא במקומם — ראו run()."""
         from telethon import errors
         tag = f"{job_tag} · Acc {idx+1}"
         while self.running:
@@ -372,7 +370,7 @@ class BackupEngine:
                                 except Exception as exc:
                                     if "protected chat" in str(exc).lower():
                                         protected = True
-                                        _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה, ללא הגבלות שניות (תקרת הקצב הנוספת אם פעילה — נשארת)", "warn")
+                                        _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
                                         await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                                     else:
                                         raise
@@ -399,17 +397,12 @@ class BackupEngine:
 
     async def _range_worker(self, client, idx, total, job_tag, job_key, source, target, media_type,
                             protected, tmp_dir, limiter, range_start, range_end):
-        """עובד עם טווח-ID קבוע ורציף (range_start..range_end) — קופץ ישירות
-        (offset_id) להודעה הראשונה בטווח שלו וממשיך משם בלבד. לעולם לא נוגע
-        בהודעה שמחוץ לטווח שלו — לא של חשבון אחר ולא 'לפני' נקודת ההתחלה —
-        כך שאין שום סריקה כפולה/מבוזבזת על תוכן ששייך למישהו אחר.
-        בסיום הטווח החשבון פשוט מסיים (ה'גל' הבא ב-_run_fast_job יקצה לו טווח חדש)."""
         from telethon import errors
         tag = f"{job_tag} · Acc {idx+1}"
         last_id = max(range_start - 1, _load_worker_id(job_key, source, idx, total))
         if last_id >= range_end:
             return
-        _log(f"[{tag}] קופץ ישירות להודעה {last_id+1} (טווח {range_start}–{range_end} — בלי לסרוק טווחים אחרים)", "info")
+        _log(f"[{tag}] קופץ ישירות להודעה {last_id+1} (טווח {range_start}–{range_end})", "info")
         reached_end = False
         while self.running and not reached_end:
             await self._wait_if_paused()
@@ -440,7 +433,7 @@ class BackupEngine:
                                 except Exception as exc:
                                     if "protected chat" in str(exc).lower():
                                         protected = True
-                                        _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה, ללא הגבלות שניות (תקרת הקצב הנוספת אם פעילה — נשארת)", "warn")
+                                        _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
                                         await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                                     else:
                                         raise
@@ -457,7 +450,6 @@ class BackupEngine:
                     else:
                         _log(f"[{tag}] Skip {msg.id}", "warn")
                 else:
-                    # אין יותר הודעות זמינות בטווח — סיימנו אותו
                     reached_end = True
 
                 if last_proc > last_id:
@@ -471,19 +463,9 @@ class BackupEngine:
 
         if reached_end:
             _save_worker_id(range_end, job_key, source, idx, total)
-            _log(f"[{tag}] סיים את הטווח שלו ({range_start}–{range_end}) — ממתין לגל הבא", "info")
+            _log(f"[{tag}] סיים את הטווח שלו ({range_start}–{range_end})", "info")
 
     async def _run_fast_job(self, job_tag, job_key, clients, source, target, media_type, protected, tmp_dir, use_limiter):
-        """מצב 'מהיר/מבולגן' עם כמה חשבונות — עובד ב'סבבים' קטנים וקבועים:
-        בכל סבב כל חשבון מקבל טווח-ID **רציף וקבוע בגודלו — 25 הודעות בדיוק**
-        (לא טווח גדול ומשתנה שנקבע לפי כמות ההודעות החדשות שהצטברו). חשבון 1
-        מקבל את 25 ההודעות הראשונות מנקודת ההמשך, חשבון 2 את ה-25 שאחריו וכו'.
-        כל חשבון קופץ ישירות (offset_id) לתחילת החלק שלו ועובד אך ורק עליו
-        (_range_worker) — בלי לגעת בהודעה אחת שמחוץ לטווח שלו. בסיום הסבב כולם
-        מתקדמים יחד לסבב הבא (25 הודעות נוספות לכל אחד), וכן הלאה — ברצף, בלי
-        סריקה חוזרת ובלי בזבוז על תוכן ששייך לחשבון אחר (בניגוד לחלוקה לפי
-        modulo, id % n, שגרמה לכל חשבון לעבור על כל הערוץ ולזרוק את רוב מה
-        שהוא רואה)."""
         n = len(clients)
         chunk_size = 25
         while self.running:
@@ -500,17 +482,17 @@ class BackupEngine:
                     latest_msgs = await clients[0].get_messages(source, limit=1)
                     latest = latest_msgs[0].id if latest_msgs else base
                 except Exception as exc:
-                    _log(f"[{job_tag}] שגיאה בבדיקת ההודעה האחרונה בערוץ: {exc}", "error")
+                    _log(f"[{job_tag}] שגיאה בבדיקת ההודעה האחרונה: {exc}", "error")
                     await asyncio.sleep(30)
                     continue
                 if latest <= base:
-                    _log(f"[{job_tag}] אין הודעות חדשות כרגע בערוץ — בודק שוב בעוד דקה", "info")
+                    _log(f"[{job_tag}] אין הודעות חדשות כרגע — בודק שוב בעוד דקה", "info")
                     await asyncio.sleep(60)
                     continue
                 wave_start = base + 1
                 wave_end = min(base + n * chunk_size, latest)
                 _save_wave(wave_start, wave_end, job_key, source)
-                _log(f"[{job_tag}] סבב חדש: {wave_end - wave_start + 1} הודעות ({wave_start}–{wave_end}) — {chunk_size} הודעות רצופות לכל חשבון, כל אחד קופץ ישירות לחלק שלו", "info")
+                _log(f"[{job_tag}] סבב חדש: {wave_end - wave_start + 1} הודעות ({wave_start}–{wave_end})", "info")
 
             tasks = []
             for i, c in enumerate(clients):
@@ -529,26 +511,18 @@ class BackupEngine:
 
             _save_last_id(wave_end, job_key, source)
             _clear_wave(job_key, source)
-            _log(f"[{job_tag}] הגל הושלם — כל החשבונות סיימו את הטווחים שלהם (עד הודעה {wave_end})", "success")
+            _log(f"[{job_tag}] הגל הושלם — עד הודעה {wave_end}", "success")
 
     async def _run_ordered_job(self, job_tag, job_key, clients, source, target, media_type, protected, tmp_dir):
-        """מצב 'מסודר/כרונולוגי': כמה חשבונות מכינים הודעות (קוראים/מורידים מדיה)
-        במקביל — אבל השליחה בפועל ליעד מתבצעת אחת-אחת, לפי הסדר הכרונולוגי
-        של ערוץ המקור, כך שאין 'בלאגן' ביעד. תפקידים:
-          • סורק (clients[0]) — עובר על ההודעות לפי הסדר וממיין אותן ל-seq עולה
-          • מכינים (כל clients) — מורידים מדיה/מכינים caption במקביל
-          • שולח יחיד (clients[0]) — שולח ליעד לפי expected seq, אחת בכל פעם
-        אין כאן תקרת 25/דקה נוספת (זו מיועדת רק לחשבון יחיד / מצב מהיר-מבולגן —
-        ראו run); שאר ההגבלות (עיכוב 1.4-3.8 שנ' בערוץ לא-מוגן) כן חלות."""
         from telethon import errors
         n = len(clients)
         scanner = clients[0]
-        sender = clients[0]
+        sender  = clients[0]
         last_id = _load_last_id(job_key, source)
 
-        queue = asyncio.Queue(maxsize=n * 3)
+        q = asyncio.Queue(maxsize=n * 3)
         ready = {}
-        cond = asyncio.Condition()
+        cond  = asyncio.Condition()
         state = {"discovered_total": None}
         expected = 0
 
@@ -560,7 +534,7 @@ class BackupEngine:
                     await self._wait_if_paused()
                     if not self.running: break
                     if _msg_matches(msg, media_type):
-                        await queue.put((seq, msg))
+                        await q.put((seq, msg))
                         seq += 1
                     else:
                         _log(f"[{job_tag} · סריקה] Skip {msg.id}", "warn")
@@ -571,14 +545,14 @@ class BackupEngine:
                 async with cond:
                     cond.notify_all()
                 for _ in range(n):
-                    await queue.put(None)
+                    await q.put(None)
 
         async def prepare(client, idx):
             tag = f"{job_tag} · Acc {idx+1}"
             while True:
-                item = await queue.get()
+                item = await q.get()
                 if item is None:
-                    queue.task_done()
+                    q.task_done()
                     break
                 seq, msg = item
                 await self._wait_if_paused()
@@ -602,7 +576,7 @@ class BackupEngine:
                 async with cond:
                     ready[seq] = payload
                     cond.notify_all()
-                queue.task_done()
+                q.task_done()
 
         async def deliver():
             nonlocal expected
@@ -618,12 +592,12 @@ class BackupEngine:
                     if not self.running:
                         return
                     if expected not in ready:
-                        return  # נסרקו כל ההודעות התואמות ונשלחו
+                        return
                     payload = ready.pop(expected)
 
                 await self._wait_if_paused()
                 if not self.running: return
-                kind = payload["kind"]
+                kind   = payload["kind"]
                 msg_id = payload["msg_id"]
                 try:
                     if kind == "downloaded":
@@ -672,163 +646,172 @@ class BackupEngine:
         await asyncio.gather(discover(), *[prepare(c, i) for i, c in enumerate(clients)], deliver())
 
     async def run(self):
+        """Runs a SINGLE job (identified by self.job_id) independently."""
         from telethon import TelegramClient
+
         self.running = True
-        STATUS["transferred"] = 0
-        accounts_cfg = self.config.get("accounts", [])
-        jobs = self.config.get("jobs", [])
+        JOB_STATES[self.job_id] = {"running": True, "paused": False, "engine": self}
+        _update_global_status()
 
-        if not jobs:
-            _log("לא הוגדרו משימות — אין מה להפעיל.", "error")
-            self.running = False; STATUS["running"] = False; return
+        cfg          = self.config
+        accounts_cfg = cfg.get("accounts", [])
 
-        # מתחברים פעם אחת לכל החשבונות המוגדרים — כל משימה תקבל את תת-הקבוצה שלה
-        name_to_client = {}
-        for acc in accounts_cfg:
+        # Find the specific job for this engine
+        job = next((j for j in cfg.get("jobs", []) if j.get("id") == self.job_id), None)
+        if not job:
+            _log(f"[{self.job_id}] משימה לא נמצאה בתצורה", "error")
+            self.running = False
+            JOB_STATES[self.job_id]["running"] = False
+            _update_global_status()
+            return
+
+        job_tag = job.get("name") or self.job_id
+        job_key = self.job_id
+
+        try:
+            source = int(job.get("source_chat_id") or 0)
+            target = int(job.get("target_chat_id") or 0)
+        except (TypeError, ValueError):
+            _log(f"[{job_tag}] Chat ID לא תקין", "error")
+            self.running = False
+            JOB_STATES[self.job_id]["running"] = False
+            _update_global_status()
+            return
+
+        if not source or not target:
+            _log(f"[{job_tag}] חסרים Chat ID של מקור/יעד", "error")
+            self.running = False
+            JOB_STATES[self.job_id]["running"] = False
+            _update_global_status()
+            return
+
+        # Connect accounts assigned to this job
+        clients = []
+        for ai in (job.get("account_indices") or []):
+            if not isinstance(ai, int) or ai < 0 or ai >= len(accounts_cfg):
+                continue
+            acc = accounts_cfg[ai]
             name = acc.get("client_name", "")
-            if not acc.get("api_id") or not acc.get("api_hash"): continue
+            if not acc.get("api_id") or not acc.get("api_hash"):
+                continue
+            # Reuse existing connected session if available
             state = AUTH_STATE.get(name)
-            if state and state["status"] == "connected" and state.get("client"):
-                name_to_client[name] = state["client"]
-                _log(f"{name} reusing session", "success")
+            if state and state.get("status") == "connected" and state.get("client"):
+                clients.append(state["client"])
+                _log(f"[{job_tag}] {name} reusing session", "success")
             else:
                 session_path = os.path.join(DATA_DIR, name)
                 try:
                     c = TelegramClient(session_path, int(acc["api_id"]), acc["api_hash"])
                     await c.connect()
                     if await c.is_user_authorized():
-                        name_to_client[name] = c
+                        clients.append(c)
                         AUTH_STATE[name] = {"client": c, "status": "connected"}
-                        _log(f"{name} connected", "success")
+                        _log(f"[{job_tag}] {name} connected", "success")
                     else:
-                        _log(f"{name} not authorized — use Connect button", "error")
+                        _log(f"[{job_tag}] {name} not authorized — use Connect button", "error")
                 except Exception as exc:
-                    _log(f"Failed {name}: {exc}", "error")
+                    _log(f"[{job_tag}] Failed {name}: {exc}", "error")
 
-        if not name_to_client:
-            _log("No authorized accounts — aborting.", "error")
-            self.running = False; STATUS["running"] = False; return
-
-        tmp_dir = os.path.join(DATA_DIR, "tmp_media")
-        job_tasks = []
-        used_indices = set()  # אכיפת "חשבון אחד למשימה אחת בלבד"
-
-        for j_idx, job in enumerate(jobs):
-            job_tag = job.get("name") or f"משימה {j_idx+1}"
-            job_key = job.get("id") or f"job{j_idx}"
-            try:
-                source = int(job.get("source_chat_id") or 0)
-                target = int(job.get("target_chat_id") or 0)
-            except (TypeError, ValueError):
-                _log(f"[{job_tag}] Chat ID לא תקין — מדלג על המשימה", "error")
-                continue
-            if not source or not target:
-                _log(f"[{job_tag}] חסרים Chat ID — מדלג על המשימה", "error")
-                continue
-
-            clients = []
-            for ai in (job.get("account_indices") or []):
-                if not isinstance(ai, int) or ai < 0 or ai >= len(accounts_cfg):
-                    continue
-                if ai in used_indices:
-                    _log(f"[{job_tag}] חשבון #{ai+1} כבר משויך למשימה אחרת — מדלג עליו (חשבון אחד יכול להשתתף במשימה אחת בלבד)", "warn")
-                    continue
-                name = accounts_cfg[ai].get("client_name", "")
-                client = name_to_client.get(name)
-                if not client:
-                    _log(f"[{job_tag}] חשבון #{ai+1} ({name}) לא מחובר — מדלג עליו", "warn")
-                    continue
-                used_indices.add(ai)
-                clients.append(client)
-
-            if not clients:
-                _log(f"[{job_tag}] אין חשבונות מחוברים וזמינים למשימה — מדלגים עליה", "error")
-                continue
-
-            media_type = job.get("media_type", "video_doc")
-            mode       = job.get("mode", "fast")
-            n          = len(clients)
-            start_from = int(job.get("start_from_id") or 0)
-            if start_from:
-                # קפיצה ישירה להודעה המוגדרת — חד-פעמית, ללא "סריקה" מההתחלה.
-                # אחרי שמשתמשים בערך פעם אחת מנקים אותו מהתצורה כדי שלא יתאפס
-                # שוב בכל הפעלה (זה היה גורם להעברה "לא להתקדם" — מתחיל מאותה
-                # נקודה בכל ריצה במקום להמשיך מההתקדמות השמורה).
-                _save_last_id(start_from, job_key, source)
-                for i in range(n):
-                    _save_worker_id(start_from, job_key, source, i, n)
-                _log(f"[{job_tag}] קופץ ישירות להודעה {start_from} (חד-פעמי, בלי לסרוק) — מכאן ימשיך מההתקדמות שנשמרת", "info")
-                try:
-                    full_cfg = _load_cfg()
-                    for jb in full_cfg.get("jobs", []):
-                        if (jb.get("id") or "") == job_key:
-                            jb["start_from_id"] = 0
-                    _save_cfg(full_cfg)
-                except Exception:
-                    pass
-                job["start_from_id"] = 0
-
-            protected = False
-            try:
-                src_ent = await clients[0].get_entity(source)
-                protected = bool(getattr(src_ent, "noforwards", False))
-                if protected:
-                    os.makedirs(tmp_dir, exist_ok=True)
-                    _log(f"[{job_tag}] ערוץ מקור מוגן (Protected Content) — מצב הורדה+העלאה פעיל, ללא הגבלות שניות", "warn")
-            except Exception:
-                pass
-
-            # תקרת 25 הודעות/דקה נוספת — רק כשחשבון יחיד מעביר, או כשכמה
-            # חשבונות עובדים במצב 'מהיר/מבולגן'. התקרה היא *לכל חשבון בנפרד*
-            # (כל חשבון עד 25/דקה משלו — לא תקרה משותפת לכלל המשימה).
-            # במצב 'מסודר' עם כמה חשבונות — אין תקרה נוספת (השליחה ממילא טורית
-            # ומסודרת). שאר ההגבלות נשארות בכל מצב.
-            use_limiter = (n == 1 or mode == "fast")
-            if use_limiter:
-                _log(f"[{job_tag}] תקרת קצב נוספת פעילה: עד 25 הודעות לדקה לכל חשבון בנפרד (בנוסף לשאר ההגבלות)", "info")
-
-            mode_label = "⚡ מהיר/מבולגן" if (mode == "fast" or n == 1) else "📑 מסודר/כרונולוגי"
-            _log(f"[{job_tag}] Active [{media_type}] — {source} → {target} | {n} חשבונות | מצב: {mode_label}", "info")
-
-            if mode == "ordered" and n > 1:
-                job_tasks.append(self._run_ordered_job(job_tag, job_key, clients, source, target, media_type, protected, tmp_dir))
-            elif n > 1:
-                # מצב מהיר עם כמה חשבונות — חלוקה לטווחי-ID רציפים וקבועים מראש
-                # (כל חשבון קופץ ישירות לטווח שלו, ללא סריקה כפולה/מבוזבזת).
-                job_tasks.append(self._run_fast_job(job_tag, job_key, clients, source, target, media_type, protected, tmp_dir, use_limiter))
-            else:
-                job_tasks.append(
-                    self._worker(clients[0], 0, 1, job_tag, job_key, source, target, media_type, protected, tmp_dir,
-                                 _RateLimiter(25, tag=f"{job_tag} · Acc 1") if use_limiter else None)
-                )
-
-        if not job_tasks:
-            _log("אין משימות פעילות לביצוע (כולן דולגו).", "error")
-            self.running = False; STATUS["running"] = False
-            for c in name_to_client.values():
-                try: await c.disconnect()
-                except Exception: pass
+        if not clients:
+            _log(f"[{job_tag}] אין חשבונות מחוברים וזמינים — מבטל", "error")
+            self.running = False
+            JOB_STATES[self.job_id]["running"] = False
+            _update_global_status()
             return
 
-        await asyncio.gather(*job_tasks)
+        media_type = job.get("media_type", "video_doc")
+        mode       = job.get("mode", "fast")
+        n          = len(clients)
 
-        for c in name_to_client.values():
-            try: await c.disconnect()
-            except Exception: pass
-        _log("Stopped.", "info")
-        STATUS["running"] = False
+        start_from = int(job.get("start_from_id") or 0)
+        if start_from:
+            _save_last_id(start_from, job_key, source)
+            for i in range(n):
+                _save_worker_id(start_from, job_key, source, i, n)
+            _log(f"[{job_tag}] קופץ ישירות להודעה {start_from} (חד-פעמי)", "info")
+            try:
+                full_cfg = _load_cfg()
+                for jb in full_cfg.get("jobs", []):
+                    if (jb.get("id") or "") == job_key:
+                        jb["start_from_id"] = 0
+                _save_cfg(full_cfg)
+            except Exception:
+                pass
+            job["start_from_id"] = 0
+
+        protected = False
+        try:
+            src_ent  = await clients[0].get_entity(source)
+            protected = bool(getattr(src_ent, "noforwards", False))
+            if protected:
+                tmp_dir = os.path.join(DATA_DIR, "tmp_media")
+                os.makedirs(tmp_dir, exist_ok=True)
+                _log(f"[{job_tag}] ערוץ מקור מוגן — מצב הורדה+העלאה פעיל", "warn")
+        except Exception:
+            pass
+
+        tmp_dir    = os.path.join(DATA_DIR, "tmp_media")
+        use_limiter = (n == 1 or mode == "fast")
+        if use_limiter:
+            _log(f"[{job_tag}] תקרת 25 הודעות/דקה לחשבון — פעילה", "info")
+
+        if n == 1:
+            mode_label = "⚡ מהיר"
+        elif mode == "fast":
+            mode_label = "⚡ מהיר/מבולגן"
+        else:
+            mode_label = "📑 מסודר/כרונולוגי"
+        _log(f"[{job_tag}] Active [{media_type}] — {source} → {target} | {n} חשבונות | {mode_label}", "info")
+
+        try:
+            if mode == "ordered" and n > 1:
+                await self._run_ordered_job(job_tag, job_key, clients, source, target, media_type, protected, tmp_dir)
+            elif n > 1:
+                await self._run_fast_job(job_tag, job_key, clients, source, target, media_type, protected, tmp_dir, use_limiter)
+            else:
+                await self._worker(clients[0], 0, 1, job_tag, job_key, source, target, media_type, protected, tmp_dir,
+                                   _RateLimiter(25, tag=f"{job_tag} · Acc 1") if use_limiter else None)
+        except Exception as exc:
+            _log(f"[{job_tag}] Engine error: {exc}", "error")
+        finally:
+            # Only disconnect clients we opened here (not reused AUTH_STATE sessions)
+            for c in clients:
+                try:
+                    # Check if this is a reused session — don't disconnect it
+                    is_reused = any(
+                        s.get("client") is c
+                        for s in AUTH_STATE.values()
+                        if s.get("status") == "connected"
+                    )
+                    if not is_reused:
+                        await c.disconnect()
+                except Exception:
+                    pass
+            _log(f"[{job_tag}] Stopped.", "info")
+            self.running = False
+            JOB_STATES[self.job_id]["running"] = False
+            _update_global_status()
 
 
-def _start_worker(config):
-    engine = BackupEngine(config)
-    STATUS["engine"] = engine
+def _start_single_job(job_id, config):
+    """Start one job engine in its own coroutine on the shared TG loop."""
+    engine = BackupEngine(job_id, config)
+    JOB_STATES[job_id] = {"running": True, "paused": False, "engine": engine}
+    _update_global_status()
+
     def _run():
         future = asyncio.run_coroutine_threadsafe(engine.run(), _TG_LOOP)
-        try: future.result()
-        except Exception as e: _log(f"Worker error: {e}", "error")
-        finally: STATUS["running"] = False
-    t = threading.Thread(target=_run, daemon=True)
-    STATUS["thread"] = t; t.start()
+        try:
+            future.result()
+        except Exception as e:
+            _log(f"[{job_id}] Worker error: {e}", "error")
+        finally:
+            if job_id in JOB_STATES:
+                JOB_STATES[job_id]["running"] = False
+            _update_global_status()
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 # ── Flask ─────────────────────────────────────────────────────────────────────
@@ -845,6 +828,8 @@ def create_app():
 
     @app.route("/config", methods=["POST"])
     def update_config(): _save_cfg(request.json); return jsonify({"ok": True})
+
+    # ── Auth ───────────────────────────────────────────────────────────────────
 
     @app.route("/auth/send_code", methods=["POST"])
     def auth_send_code():
@@ -887,59 +872,148 @@ def create_app():
     def auth_status():
         return jsonify({n: s.get("status", "unknown") for n, s in AUTH_STATE.items()})
 
+    # ── Global controls (start/stop/pause/resume ALL jobs) ─────────────────────
+
     @app.route("/start", methods=["POST"])
     def start():
-        if STATUS["running"]: return jsonify({"ok": False, "msg": "Already running"})
-        cfg = _load_cfg()
+        cfg  = _load_cfg()
         jobs = cfg.get("jobs", [])
         if not jobs:
             return jsonify({"ok": False, "msg": "לא הוגדרו משימות — הוסף משימה בלשונית 'משימות'"})
-        seen = set()
-        for j in jobs:
-            name = j.get("name") or "משימה"
-            if not j.get("source_chat_id") or not j.get("target_chat_id"):
-                return jsonify({"ok": False, "msg": f"במשימה '{name}' חסרים Chat ID של מקור/יעד"})
-            for ai in (j.get("account_indices") or []):
+
+        # Validate no account appears in more than one job
+        seen: set = set()
+        for job in jobs:
+            for ai in (job.get("account_indices") or []):
                 if ai in seen:
-                    return jsonify({"ok": False, "msg": f"חשבון אחד לא יכול להיות משויך ליותר ממשימה אחת (זוהה במשימה '{name}')"})
+                    name = job.get("name", "")
+                    return jsonify({"ok": False, "msg": f"חשבון אחד לא יכול להשתתף ביותר ממשימה אחת (זוהה במשימה '{name}')"})
                 seen.add(ai)
-        STATUS["running"] = True; STATUS["paused"] = False
-        _log("Starting…", "info"); _start_worker(cfg)
+
+        started = 0
+        for job in jobs:
+            jid = job.get("id")
+            if not jid: continue
+            if JOB_STATES.get(jid, {}).get("running"): continue
+            if not job.get("source_chat_id") or not job.get("target_chat_id"): continue
+            _log(f"Starting [{job.get('name') or jid}]…", "info")
+            _start_single_job(jid, cfg)
+            started += 1
+
+        if started == 0:
+            return jsonify({"ok": False, "msg": "כל המשימות כבר פועלות או שחסרים Chat ID"})
         return jsonify({"ok": True})
 
     @app.route("/stop", methods=["POST"])
     def stop():
-        if STATUS.get("engine"): STATUS["engine"].stop()
-        STATUS["running"] = False; _log("Stopping…", "warn"); return jsonify({"ok": True})
+        for jid, state in list(JOB_STATES.items()):
+            engine = state.get("engine")
+            if engine: engine.stop()
+            JOB_STATES[jid]["running"] = False
+        _update_global_status()
+        _log("עצירת כל המשימות…", "warn")
+        return jsonify({"ok": True})
 
     @app.route("/pause", methods=["POST"])
     def pause():
-        if STATUS.get("engine"): STATUS["engine"].pause(); STATUS["paused"] = True
+        for state in JOB_STATES.values():
+            engine = state.get("engine")
+            if engine and state.get("running"): engine.pause()
         return jsonify({"ok": True})
 
     @app.route("/resume", methods=["POST"])
     def resume():
-        if STATUS.get("engine"): STATUS["engine"].resume(); STATUS["paused"] = False
+        for state in JOB_STATES.values():
+            engine = state.get("engine")
+            if engine and state.get("running"): engine.resume()
         return jsonify({"ok": True})
 
+    # ── Per-job controls ───────────────────────────────────────────────────────
+
+    @app.route("/job/<job_id>/start", methods=["POST"])
+    def job_start(job_id):
+        if JOB_STATES.get(job_id, {}).get("running"):
+            return jsonify({"ok": False, "msg": "כבר פועל"})
+        cfg = _load_cfg()
+        job = next((j for j in cfg.get("jobs", []) if j.get("id") == job_id), None)
+        if not job:
+            return jsonify({"ok": False, "msg": "משימה לא נמצאה"})
+        if not job.get("source_chat_id") or not job.get("target_chat_id"):
+            return jsonify({"ok": False, "msg": "חסרים Chat ID של מקור/יעד"})
+
+        # Check that none of this job's accounts are busy in another running job
+        my_accounts = set(job.get("account_indices") or [])
+        for other_jid, other_state in JOB_STATES.items():
+            if other_jid == job_id or not other_state.get("running"):
+                continue
+            other_job = next((j for j in cfg.get("jobs", []) if j.get("id") == other_jid), None)
+            if not other_job: continue
+            conflict = my_accounts & set(other_job.get("account_indices") or [])
+            if conflict:
+                acc_names = [cfg["accounts"][i]["client_name"] for i in conflict if i < len(cfg["accounts"])]
+                return jsonify({"ok": False, "msg": f"חשבון {', '.join(acc_names)} כבר משויך למשימה רצה אחרת"})
+
+        _log(f"Starting [{job.get('name') or job_id}]…", "info")
+        _start_single_job(job_id, cfg)
+        return jsonify({"ok": True})
+
+    @app.route("/job/<job_id>/stop", methods=["POST"])
+    def job_stop(job_id):
+        state  = JOB_STATES.get(job_id, {})
+        engine = state.get("engine")
+        if engine: engine.stop()
+        if job_id in JOB_STATES:
+            JOB_STATES[job_id]["running"] = False
+        _update_global_status()
+        _log(f"[{job_id}] עוצר…", "warn")
+        return jsonify({"ok": True})
+
+    @app.route("/job/<job_id>/pause", methods=["POST"])
+    def job_pause_route(job_id):
+        state  = JOB_STATES.get(job_id, {})
+        engine = state.get("engine")
+        if engine and state.get("running"): engine.pause()
+        return jsonify({"ok": True})
+
+    @app.route("/job/<job_id>/resume", methods=["POST"])
+    def job_resume_route(job_id):
+        state  = JOB_STATES.get(job_id, {})
+        engine = state.get("engine")
+        if engine and state.get("running"): engine.resume()
+        return jsonify({"ok": True})
+
+    # ── Status ─────────────────────────────────────────────────────────────────
+
     @app.route("/status")
-    def status(): return jsonify({"running": STATUS["running"], "paused": STATUS["paused"], "transferred": STATUS["transferred"]})
+    def status():
+        return jsonify({
+            "running":     STATUS["running"],
+            "paused":      STATUS["paused"],
+            "transferred": STATUS["transferred"],
+        })
 
     @app.route("/jobs_status")
     def jobs_status():
         cfg = _load_cfg()
         out = []
         for job in cfg.get("jobs", []):
-            n = len(job.get("account_indices") or [])
-            out.append({"id": job.get("id", ""), "last_id": _job_progress(job, n)})
+            n   = len(job.get("account_indices") or [])
+            jid = job.get("id", "")
+            st  = JOB_STATES.get(jid, {})
+            out.append({
+                "id":      jid,
+                "last_id": _job_progress(job, n),
+                "running": st.get("running", False),
+                "paused":  st.get("paused",  False),
+            })
         return jsonify(out)
 
     @app.route("/reset_last_id", methods=["POST"])
     def reset_last_id():
-        data = request.json or {}
+        data   = request.json or {}
         job_id = data.get("job_id", "")
-        cfg = _load_cfg()
-        job = next((j for j in cfg.get("jobs", []) if j.get("id") == job_id), None)
+        cfg    = _load_cfg()
+        job    = next((j for j in cfg.get("jobs", []) if j.get("id") == job_id), None)
         if not job:
             return jsonify({"ok": False, "msg": "Job not found"})
         try:

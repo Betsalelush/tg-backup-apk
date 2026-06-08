@@ -411,6 +411,15 @@ function buildJobUI() {
       <div class="field" style="margin-top:10px">
         <label>התחל מהודעה מספר (0 = המשך מהמקום האחרון)</label>
         <input id="jstart${i}" type="number" min="0" placeholder="0" value="${job.start_from_id||0}">
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;align-items:center;
+                  background:#f5f5f5;border-radius:6px;padding:10px;border:1px solid #ddd">
+        <span id="jstatdot${i}" style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#bbb;flex-shrink:0"></span>
+        <span id="jstattext${i}" style="font-size:.82rem;color:#555;flex:1">עצור</span>
+        <button class="sm" id="jbStart${i}"  onclick="jobStart(${i})"  style="background:#2e7d32;color:#fff;border-color:#2e7d32">▶ הפעל</button>
+        <button class="sm" id="jbPause${i}"  onclick="jobPause(${i})"  style="background:#e65100;color:#fff;border-color:#e65100" disabled>⏸ השהה</button>
+        <button class="sm" id="jbResume${i}" onclick="jobResume(${i})" style="background:#1565c0;color:#fff;border-color:#1565c0" disabled>▶ המשך</button>
+        <button class="sm" id="jbStop${i}"   onclick="jobStop(${i})"   style="background:#c62828;color:#fff;border-color:#c62828" disabled>■ עצור</button>
       </div>`;
     panels.appendChild(p);
 
@@ -502,6 +511,51 @@ async function resetJobLastId(i) {
   await fetch('/reset_last_id',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id: jobs[i].id})});
   const el = document.getElementById(`jlast${i}`);
   if (el) el.textContent = '0';
+}
+
+// ── Per-job controls ──────────────────────────────────────────────────────────
+async function jobStart(i) {
+  await saveConfig();
+  const jid = jobs[i]?.id;
+  if (!jid) return;
+  const r = await post(`/job/${encodeURIComponent(jid)}/start`, {});
+  if (!r.ok) { addLog({time:now(),level:'error',msg:`[${jobs[i].name}] ${r.msg}`}); alert(r.msg); }
+}
+async function jobStop(i) {
+  const jid = jobs[i]?.id; if (!jid) return;
+  await post(`/job/${encodeURIComponent(jid)}/stop`, {});
+}
+async function jobPause(i) {
+  const jid = jobs[i]?.id; if (!jid) return;
+  await post(`/job/${encodeURIComponent(jid)}/pause`, {});
+}
+async function jobResume(i) {
+  const jid = jobs[i]?.id; if (!jid) return;
+  await post(`/job/${encodeURIComponent(jid)}/resume`, {});
+}
+
+function applyJobStatus(jst) {
+  (jst||[]).forEach(js => {
+    const idx = jobs.findIndex(j => j.id === js.id);
+    if (idx < 0) return;
+    const dot     = document.getElementById(`jstatdot${idx}`);
+    const text    = document.getElementById(`jstattext${idx}`);
+    const bStart  = document.getElementById(`jbStart${idx}`);
+    const bPause  = document.getElementById(`jbPause${idx}`);
+    const bResume = document.getElementById(`jbResume${idx}`);
+    const bStop   = document.getElementById(`jbStop${idx}`);
+    const lastEl  = document.getElementById(`jlast${idx}`);
+    if (lastEl) lastEl.textContent = js.last_id ?? 0;
+    if (dot) {
+      dot.style.background  = js.running ? (js.paused ? '#e65100' : '#2e7d32') : '#bbb';
+      dot.style.boxShadow   = js.running ? (js.paused ? '0 0 5px #e65100' : '0 0 5px #2e7d32') : 'none';
+    }
+    if (text) text.textContent = js.running ? (js.paused ? 'מושהה' : 'פועל') : 'עצור';
+    if (bStart)  bStart.disabled  = js.running;
+    if (bStop)   bStop.disabled   = !js.running;
+    if (bPause)  bPause.disabled  = !js.running || js.paused;
+    if (bResume) bResume.disabled = !js.running || !js.paused;
+  });
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -612,13 +666,7 @@ async function pollStatus() {
     applyStatus(s.running, s.paused);
     const tv = document.getElementById('transferredVal');
     if (tv && s.transferred !== undefined) tv.textContent = s.transferred;
-    (jst||[]).forEach(js => {
-      const idx = jobs.findIndex(j => j.id === js.id);
-      if (idx >= 0) {
-        const el = document.getElementById(`jlast${idx}`);
-        if (el) el.textContent = js.last_id ?? 0;
-      }
-    });
+    applyJobStatus(jst);
     const liveBox  = document.getElementById('jobsLiveBox');
     const liveList = document.getElementById('jobsLiveList');
     if (liveBox && liveList) {
