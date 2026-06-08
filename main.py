@@ -24,9 +24,55 @@ from kivy.uix.boxlayout import BoxLayout          # noqa: E402
 from kivy.uix.label import Label                  # noqa: E402
 from kivy.clock import Clock, mainthread          # noqa: E402
 from kivy.logger import Logger                    # noqa: E402
+from kivy.core.window import Window               # noqa: E402
 
 SERVER_URL = "http://127.0.0.1:5050"
 _server_started = threading.Event()
+_wake_lock = None
+
+
+def _is_android():
+    import platform
+    return platform.system() == "Linux" and "ANDROID_ROOT" in os.environ
+
+
+# ── Keep the app (and the backup run inside it) alive ────────────────────────
+# Android can suspend the CPU or kill the process once the screen locks /
+# the app goes to the background, which would silently abort a running job.
+# A partial wake lock keeps the CPU awake; keep_screen_on keeps the screen
+# from locking while the app is in the foreground.
+
+def _acquire_wakelock():
+    global _wake_lock
+    if not _is_android() or _wake_lock is not None:
+        return
+    try:
+        from jnius import autoclass  # type: ignore
+
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Context = autoclass("android.content.Context")
+        PowerManager = autoclass("android.os.PowerManager")
+
+        activity = PythonActivity.mActivity
+        power_service = activity.getSystemService(Context.POWER_SERVICE)
+        lock = power_service.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TGBackup:run")
+        lock.setReferenceCounted(False)
+        lock.acquire()
+        _wake_lock = lock
+        Logger.info("TGBackup: wake lock acquired, run will keep going in the background")
+    except Exception as exc:
+        Logger.warning(f"TGBackup: could not acquire wake lock ({exc})")
+
+
+def _release_wakelock():
+    global _wake_lock
+    if _wake_lock is None:
+        return
+    try:
+        _wake_lock.release()
+    except Exception:
+        pass
+    _wake_lock = None
 
 
 # ── Flask server thread ───────────────────────────────────────────────────────
@@ -92,6 +138,21 @@ def _open_browser_fallback():
 # ── Kivy App ─────────────────────────────────────────────────────────────────
 
 class TGBackupApp(App):
+    def on_start(self):
+        Window.keep_screen_on = True
+        _acquire_wakelock()
+
+    def on_stop(self):
+        _release_wakelock()
+
+    def on_pause(self):
+        # Keep running in the background instead of being stopped, so the
+        # backup job in the Flask thread doesn't get cut off.
+        return True
+
+    def on_resume(self):
+        pass
+
     def build(self):
         self.title = "TG Backup"
 
@@ -121,8 +182,7 @@ class TGBackupApp(App):
     def _switch_to_webview(self, *_):
         self.status_label.text = "Opening interface…"
         try:
-            import platform
-            if platform.system() == "Linux" and "ANDROID_ROOT" in os.environ:
+            if _is_android():
                 _open_native_webview()
             else:
                 # Desktop: just open browser

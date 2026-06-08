@@ -16,7 +16,7 @@ DATA_DIR    = os.environ.get("TG_DATA_DIR", os.path.dirname(os.path.abspath(__fi
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
-APP_VERSION  = "1.2"
+APP_VERSION  = "1.3"
 BOT_TOKEN    = "8867679619:AAFf7O96HEbKako4rE-xg_kAHe-OICOQVFw"
 REPORT_CHAT  = "@backuppppy"   # הבוט חייב להיות חבר בקבוצה
 TG_GROUP_URL = "https://t.me/backuppppy"
