@@ -729,6 +729,12 @@ function clearLogs() {
 
 function now() { return new Date().toTimeString().slice(0,8); }
 
+async function post(url, body) {
+  try {
+    return await (await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})).json();
+  } catch(e) { return {ok:false, msg:String(e)}; }
+}
+
 init();
 </script>
 </body>
