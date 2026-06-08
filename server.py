@@ -1,6 +1,5 @@
 import asyncio
 import glob
-import hashlib
 import json
 import os
 import queue
@@ -17,8 +16,6 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 
 APP_VERSION  = "1.3"
-BOT_TOKEN    = "8867679619:AAFf7O96HEbKako4rE-xg_kAHe-OICOQVFw"
-REPORT_CHAT  = "@backuppppy"   # הבוט חייב להיות חבר בקבוצה
 TG_GROUP_URL = "https://t.me/backuppppy"
 GITHUB_URL   = "https://github.com/Betsalelush/tg-backup-apk"
 
@@ -26,38 +23,6 @@ LOG_Q  = queue.Queue(maxsize=500)
 STATUS = {"running": False, "paused": False, "engine": None, "thread": None, "transferred": 0}
 AUTH_STATE = {}
 
-
-def _bot_send(text):
-    """שולח הודעה לבוט — לעולם לא זורק שגיאה.
-    כל הודעה (כולל דיווחי שגיאה/דיבאג) כוללת את גרסת האפליקציה בסוף,
-    כדי שאפשר יהיה לדעת מאיזו גרסה הגיע כל דיווח."""
-    try:
-        import urllib.request, urllib.parse
-        data = urllib.parse.urlencode({
-            "chat_id": REPORT_CHAT,
-            "text": f"{text}\n\n— גרסה {APP_VERSION}",
-            "disable_notification": "true"
-        }).encode()
-        urllib.request.urlopen(
-            urllib.request.Request(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data=data
-            ), timeout=5
-        )
-    except Exception:
-        pass
-
-def _try_register(phone):
-    """רושם משתמש חדש פעם אחת — hash של מספר הטלפון, לא נשמר מידע אישי"""
-    try:
-        cfg = _load_cfg()
-        if cfg.get("registered"):
-            return
-        h = hashlib.sha256(phone.encode()).hexdigest()[:16]
-        _bot_send(f"👤 New user: {h}")
-        cfg["registered"] = True
-        _save_cfg(cfg)
-    except Exception:
-        pass
 
 DEFAULT_CFG = {
     "accounts": [],
@@ -424,7 +389,6 @@ class BackupEngine:
                     await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
                 _log(f"[{tag}] Error: {exc}", "error")
-                threading.Thread(target=_bot_send, args=(f"⚠️ TG Backup error ({tag}):\n{exc}",), daemon=True).start()
                 await asyncio.sleep(30)
 
     async def _range_worker(self, client, idx, total, job_tag, job_key, source, target, media_type,
@@ -497,7 +461,6 @@ class BackupEngine:
                     await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
                 _log(f"[{tag}] Error: {exc}", "error")
-                threading.Thread(target=_bot_send, args=(f"⚠️ TG Backup error ({tag}):\n{exc}",), daemon=True).start()
                 await asyncio.sleep(30)
 
         if reached_end:
@@ -885,8 +848,6 @@ def create_app():
             return jsonify({"ok": False, "msg": "Fill API ID and Phone first"})
         try:
             result = _run_async(_auth_send_code(acc))
-            if result.get("ok") and result.get("already"):
-                threading.Thread(target=_try_register, args=(acc["phone_number"],), daemon=True).start()
             return jsonify(result)
         except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
@@ -896,9 +857,6 @@ def create_app():
         if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
         try:
             result = _run_async(_auth_verify_code(cfg["accounts"][idx], data.get("code", "")))
-            if result.get("ok"):
-                phone = cfg["accounts"][idx].get("phone_number", "")
-                threading.Thread(target=_try_register, args=(phone,), daemon=True).start()
             return jsonify(result)
         except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
@@ -908,9 +866,6 @@ def create_app():
         if idx >= len(cfg["accounts"]): return jsonify({"ok": False, "msg": "Account not found"})
         try:
             result = _run_async(_auth_password(cfg["accounts"][idx], data.get("password", "")))
-            if result.get("ok"):
-                phone = cfg["accounts"][idx].get("phone_number", "")
-                threading.Thread(target=_try_register, args=(phone,), daemon=True).start()
             return jsonify(result)
         except Exception as e: return jsonify({"ok": False, "msg": str(e)})
 
