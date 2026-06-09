@@ -619,6 +619,14 @@ function gatherConfig() {
     job.start_from_id  = parseInt(document.getElementById(`jstart${i}`)?.value) || 0;
     job.account_indices = job.account_indices || [];
   });
+  // Deduplicate: first job wins, remove from later jobs
+  const usedAccounts = new Set();
+  jobs.forEach(job => {
+    job.account_indices = (job.account_indices||[]).filter(ai => {
+      if (usedAccounts.has(ai)) return false;
+      usedAccounts.add(ai); return true;
+    });
+  });
   return {
     accounts: accounts.map((_,i)=>({
       client_name: document.getElementById(`cn${i}`)?.value.trim()||`account${i+1}`,
@@ -695,7 +703,7 @@ function applyStatus(running, paused) {
   const txt = document.getElementById('statusText');
   dot.className = running?(paused?'pause':'on'):'';
   txt.textContent = running?(paused?'מושהה':'פועל'):'עצור';
-  document.getElementById('bStart').disabled  = running;
+  document.getElementById('bStart').disabled  = false;
   document.getElementById('bStop').disabled   = !running;
   document.getElementById('bPause').disabled  = !running||paused;
   document.getElementById('bResume').disabled = !running||!paused;
