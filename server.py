@@ -372,6 +372,8 @@ class BackupEngine:
                                         protected = True
                                         _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
                                         await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
+                                    elif "cannot use as file" in str(exc).lower() or "file reference" in str(exc).lower():
+                                        await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                                     else:
                                         raise
                             STATUS["transferred"] += 1
@@ -434,6 +436,8 @@ class BackupEngine:
                                     if "protected chat" in str(exc).lower():
                                         protected = True
                                         _log(f"[{tag}] זוהה ערוץ מוגן — עובר למצב הורדה+העלאה", "warn")
+                                        await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
+                                    elif "cannot use as file" in str(exc).lower() or "file reference" in str(exc).lower():
                                         await self._send_downloaded(client, target, msg, caption, tmp_dir, tag)
                                     else:
                                         raise
