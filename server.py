@@ -315,6 +315,7 @@ class BackupEngine:
     def stop(self):
         self.running = False
         self._paused = False
+        self._stopped_manually = True
 
     async def _wait_if_paused(self):
         while self._paused and self.running:
@@ -395,6 +396,11 @@ class BackupEngine:
                     await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
                 _log(f"[{tag}] Error: {exc}", "error")
+                if not client.is_connected():
+                    try:
+                        _log(f"[{tag}] מתחבר מחדש לטלגרם...", "info")
+                        await client.connect()
+                    except Exception: pass
                 await asyncio.sleep(30)
 
     async def _range_worker(self, client, idx, total, job_tag, job_key, source, target, media_type,
@@ -463,6 +469,11 @@ class BackupEngine:
                     await asyncio.sleep(random.uniform(2, 6))
             except Exception as exc:
                 _log(f"[{tag}] Error: {exc}", "error")
+                if not client.is_connected():
+                    try:
+                        _log(f"[{tag}] מתחבר מחדש לטלגרם...", "info")
+                        await client.connect()
+                    except Exception: pass
                 await asyncio.sleep(30)
 
         if reached_end:
@@ -800,20 +811,28 @@ class BackupEngine:
 
 def _start_single_job(job_id, config):
     """Start one job engine in its own coroutine on the shared TG loop."""
-    engine = BackupEngine(job_id, config)
-    JOB_STATES[job_id] = {"running": True, "paused": False, "engine": engine}
-    _update_global_status()
-
     def _run():
-        future = asyncio.run_coroutine_threadsafe(engine.run(), _TG_LOOP)
-        try:
-            future.result()
-        except Exception as e:
-            _log(f"[{job_id}] Worker error: {e}", "error")
-        finally:
-            if job_id in JOB_STATES:
-                JOB_STATES[job_id]["running"] = False
+        while True:
+            cfg = _load_cfg()
+            if not any(j.get("id") == job_id for j in cfg.get("jobs", [])):
+                break  # job was deleted from config
+            engine = BackupEngine(job_id, cfg)
+            engine._stopped_manually = False
+            JOB_STATES[job_id] = {"running": True, "paused": False, "engine": engine}
             _update_global_status()
+            try:
+                future = asyncio.run_coroutine_threadsafe(engine.run(), _TG_LOOP)
+                future.result()
+            except Exception as e:
+                _log(f"[{job_id}] Worker error: {e}", "error")
+            # Manual stop → don't restart
+            if getattr(engine, "_stopped_manually", False):
+                break
+            _log(f"[{job_id}] משימה נעצרה — מפעיל מחדש בעוד 10 שנ'", "warn")
+            time.sleep(10)
+        if job_id in JOB_STATES:
+            JOB_STATES[job_id]["running"] = False
+        _update_global_status()
 
     threading.Thread(target=_run, daemon=True).start()
 

@@ -78,14 +78,22 @@ def _release_wakelock():
 # ── Flask server thread ───────────────────────────────────────────────────────
 
 def _run_flask():
-    try:
-        from server import create_app
-        flask_app = create_app()
-        _server_started.set()
-        flask_app.run(host="127.0.0.1", port=5050, debug=False, use_reloader=False)
-    except Exception as exc:
-        Logger.error(f"TGBackup: Flask error: {exc}")
-        _server_started.set()  # unblock even on error
+    from server import create_app
+    flask_app = create_app()
+    _server_started.set()
+    while True:
+        try:
+            flask_app.run(host="127.0.0.1", port=5050, debug=False, use_reloader=False)
+        except OSError as exc:
+            if "Address already in use" in str(exc):
+                Logger.warning("TGBackup: port 5050 in use, retrying in 2s")
+                time.sleep(2)
+            else:
+                Logger.error(f"TGBackup: Flask OSError: {exc}, restarting in 3s")
+                time.sleep(3)
+        except Exception as exc:
+            Logger.error(f"TGBackup: Flask crashed: {exc}, restarting in 3s")
+            time.sleep(3)
 
 
 # ── Android WebView helper ────────────────────────────────────────────────────
