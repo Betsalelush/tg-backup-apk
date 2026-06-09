@@ -93,14 +93,23 @@ jobs:
           # Zipalign
           $BT_PATH/zipalign -f 4 "$APK" /tmp/aligned.apk
 
+          # Verify keystore is readable before signing
+          keytool -list -keystore /tmp/repo-debug.keystore -storepass android -storetype PKCS12 2>&1 | grep -E "fingerprint|alias|type" || true
+
           # Sign with fixed debug keystore from repo (consistent across builds)
           $BT_PATH/apksigner sign \
             --ks /tmp/repo-debug.keystore \
+            --ks-type PKCS12 \
             --ks-key-alias androiddebugkey \
             --ks-pass pass:android \
             --key-pass pass:android \
             --out "$APK" \
             /tmp/aligned.apk
+
+          # Verify resulting APK cert fingerprint
+          echo "APK cert fingerprint:"
+          unzip -p "$APK" META-INF/ANDROIDD.RSA 2>/dev/null | openssl pkcs7 -inform DER -print_certs 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null || \
+          unzip -p "$APK" META-INF/CERT.RSA 2>/dev/null | openssl pkcs7 -inform DER -print_certs 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null || echo "could not read cert"
 
           echo "Done: $APK"
 
